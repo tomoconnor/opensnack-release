@@ -81,3 +81,10 @@ OpenSnack is licensed under the Mozilla Public License 2.0 (MPL-2.0).
 
 You may use, modify, and distribute this software commercially.
 Modifications to OpenSnack source files must remain open.
+
+## Security
+
+Please report security issues privately via email or GitHub Security Advisories.
+Do not open public issues for vulnerabilities.
+
+
