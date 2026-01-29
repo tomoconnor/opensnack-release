@@ -74,3 +74,9 @@ The following services and operations are implemented and exercised by the k6 ha
 
 See [k6/README.md](k6/README.md) for the full test matrix.
 
+## License
+
+OpenSnack is licensed under the Mozilla Public License 2.0 (MPL-2.0).
+
+You may use, modify, and distribute this software commercially.
+Modifications to OpenSnack source files must remain open.
