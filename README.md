@@ -52,7 +52,6 @@ Load tests live in [k6/README.md](k6/README.md).
 ## Infra clients
 
 - OpenTofu examples in [opentofu/](opentofu/)
-- Pulumi example in [pulumi/README.md](pulumi/README.md)
 
 ## Supported APIs (current)
 
@@ -75,6 +74,3 @@ The following services and operations are implemented and exercised by the k6 ha
 
 See [k6/README.md](k6/README.md) for the full test matrix.
 
-## Unsupported
-
-- Bucket Lifecycle Configurations
