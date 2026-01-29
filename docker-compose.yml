@@ -1,0 +1,57 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+services:
+  postgres:
+    image: postgres:18
+    container_name: opensnack-pg
+    ports:
+      - "5438:5432"
+    environment:
+      POSTGRES_DB: opensnack
+      POSTGRES_USER: opensnack
+      POSTGRES_PASSWORD: snack
+    shm_size: "1g"
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - checkpoint_completion_target=0.9
+    volumes:
+      - pgdata:/var/lib/postgresql
+    restart: unless-stopped
+
+  opensnack:
+    image: opensnack:latest
+    container_name: opensnack
+    depends_on:
+      - postgres
+    ports:
+      - "4566:4566"
+    environment:
+      # S3 dataplane root
+      OPENSNACK_OBJECT_ROOT: /data/objects
+
+      # Postgres DSN (service name = hostname)
+      OPENSNACK_PG_DSN: postgres://opensnack:snack@postgres:5432/opensnack?sslmode=disable
+
+      # Logging
+      LOG_FORMAT: json
+      LOG_LEVEL: debug
+    volumes:
+      - opensnack_objects:/data/objects
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  opensnack_objects:
