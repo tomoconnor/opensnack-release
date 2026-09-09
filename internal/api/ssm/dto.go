@@ -6,17 +6,17 @@ package ssm
 
 // PutParameterInput represents the request to put a parameter
 type PutParameterInput struct {
-	Name        string `json:"Name"`
-	Value       string `json:"Value"`
-	Type        string `json:"Type,omitempty"`
-	Description string `json:"Description,omitempty"`
-	KeyId       string `json:"KeyId,omitempty"`
-	Overwrite   bool   `json:"Overwrite,omitempty"`
+	Name           string `json:"Name"`
+	Value          string `json:"Value"`
+	Type           string `json:"Type,omitempty"`
+	Description    string `json:"Description,omitempty"`
+	KeyId          string `json:"KeyId,omitempty"`
+	Overwrite      bool   `json:"Overwrite,omitempty"`
 	AllowedPattern string `json:"AllowedPattern,omitempty"`
-	Tags        []Tag  `json:"Tags,omitempty"`
-	Tier        string `json:"Tier,omitempty"`
-	Policies    string `json:"Policies,omitempty"`
-	DataType    string `json:"DataType,omitempty"`
+	Tags           []Tag  `json:"Tags,omitempty"`
+	Tier           string `json:"Tier,omitempty"`
+	Policies       string `json:"Policies,omitempty"`
+	DataType       string `json:"DataType,omitempty"`
 }
 
 // Tag represents an SSM tag
@@ -27,13 +27,13 @@ type Tag struct {
 
 // PutParameterOutput represents the response from putting a parameter
 type PutParameterOutput struct {
-	Version int64 `json:"Version"`
+	Version int64  `json:"Version"`
 	Tier    string `json:"Tier,omitempty"`
 }
 
 // GetParameterInput represents the request to get a parameter
 type GetParameterInput struct {
-	Name            string `json:"Name"`
+	Name           string `json:"Name"`
 	WithDecryption bool   `json:"WithDecryption,omitempty"`
 }
 
@@ -44,27 +44,27 @@ type GetParameterOutput struct {
 
 // Parameter represents an SSM parameter
 type Parameter struct {
-	Name        string  `json:"Name"`
-	Type        string  `json:"Type"`
-	Value       string  `json:"Value"`
-	Version     int64   `json:"Version"`
-	Selector    string  `json:"Selector,omitempty"`
-	SourceResult string `json:"SourceResult,omitempty"`
+	Name             string  `json:"Name"`
+	Type             string  `json:"Type"`
+	Value            string  `json:"Value"`
+	Version          int64   `json:"Version"`
+	Selector         string  `json:"Selector,omitempty"`
+	SourceResult     string  `json:"SourceResult,omitempty"`
 	LastModifiedDate float64 `json:"LastModifiedDate"`
-	ARN         string  `json:"ARN"`
-	DataType    string  `json:"DataType,omitempty"`
+	ARN              string  `json:"ARN"`
+	DataType         string  `json:"DataType,omitempty"`
 }
 
 // GetParametersInput represents the request to get multiple parameters
 type GetParametersInput struct {
-	Names           []string `json:"Names"`
-	WithDecryption  bool     `json:"WithDecryption,omitempty"`
+	Names          []string `json:"Names"`
+	WithDecryption bool     `json:"WithDecryption,omitempty"`
 }
 
 // GetParametersOutput represents the response from getting multiple parameters
 type GetParametersOutput struct {
-	Parameters            []Parameter `json:"Parameters"`
-	InvalidParameters     []string    `json:"InvalidParameters,omitempty"`
+	Parameters        []Parameter `json:"Parameters"`
+	InvalidParameters []string    `json:"InvalidParameters,omitempty"`
 }
 
 // DescribeParametersInput represents the request to describe parameters
@@ -106,8 +106,8 @@ type ParameterMetadata struct {
 
 // Policy represents a parameter policy
 type Policy struct {
-	PolicyText string `json:"PolicyText"`
-	PolicyType string `json:"PolicyType"`
+	PolicyText   string `json:"PolicyText"`
+	PolicyType   string `json:"PolicyType"`
 	PolicyStatus string `json:"PolicyStatus,omitempty"`
 }
 
@@ -130,4 +130,3 @@ type DeleteParameterInput struct {
 // DeleteParameterOutput represents the response from deleting a parameter
 type DeleteParameterOutput struct {
 }
-

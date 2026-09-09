@@ -77,9 +77,9 @@ type CreateUserResult struct {
 }
 
 type CreateUserResponse struct {
-	XMLName            xml.Name           `xml:"CreateUserResponse"`
-	CreateUserResult   CreateUserResult   `xml:"CreateUserResult"`
-	ResponseMetadata   ResponseMetadata   `xml:"ResponseMetadata"`
+	XMLName          xml.Name         `xml:"CreateUserResponse"`
+	CreateUserResult CreateUserResult `xml:"CreateUserResult"`
+	ResponseMetadata ResponseMetadata `xml:"ResponseMetadata"`
 }
 
 //
@@ -179,10 +179,10 @@ type GetPolicyVersionResponse struct {
 //
 
 type ListPolicyVersionsResult struct {
-	XMLName       xml.Name        `xml:"ListPolicyVersionsResult"`
-	Versions      []PolicyVersion `xml:"Versions>member"`
-	IsTruncated   bool            `xml:"IsTruncated"`
-	Marker        string          `xml:"Marker,omitempty"`
+	XMLName     xml.Name        `xml:"ListPolicyVersionsResult"`
+	Versions    []PolicyVersion `xml:"Versions>member"`
+	IsTruncated bool            `xml:"IsTruncated"`
+	Marker      string          `xml:"Marker,omitempty"`
 }
 
 type ListPolicyVersionsResponse struct {

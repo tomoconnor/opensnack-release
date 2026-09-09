@@ -162,17 +162,17 @@ func (h *Handler) PutParameter(w http.ResponseWriter, r *http.Request) {
 
 	// Build parameter metadata
 	paramMetadata := map[string]any{
-		"name":              req.Name,
-		"value":             req.Value,
-		"type":              paramType,
-		"description":       req.Description,
-		"key_id":            req.KeyId,
-		"version":           float64(version),
+		"name":               req.Name,
+		"value":              req.Value,
+		"type":               paramType,
+		"description":        req.Description,
+		"key_id":             req.KeyId,
+		"version":            float64(version),
 		"last_modified_date": lastModifiedDate,
-		"created_date":      createdDate,
-		"arn":               parameterArn(req.Name),
-		"data_type":         req.DataType,
-		"tags":              req.Tags,
+		"created_date":       createdDate,
+		"arn":                parameterArn(req.Name),
+		"data_type":          req.DataType,
+		"tags":               req.Tags,
 	}
 
 	if req.Tier != "" {
@@ -260,10 +260,10 @@ func (h *Handler) GetParameter(w http.ResponseWriter, r *http.Request) {
 
 	// Extract values with type assertions
 	param := Parameter{
-		Name:        entry["name"].(string),
-		Type:        entry["type"].(string),
-		Value:       entry["value"].(string),
-		ARN:         entry["arn"].(string),
+		Name:             entry["name"].(string),
+		Type:             entry["type"].(string),
+		Value:            entry["value"].(string),
+		ARN:              entry["arn"].(string),
 		LastModifiedDate: entry["last_modified_date"].(float64),
 	}
 
@@ -322,10 +322,10 @@ func (h *Handler) GetParameters(w http.ResponseWriter, r *http.Request) {
 
 		// Extract values with type assertions
 		param := Parameter{
-			Name:        entry["name"].(string),
-			Type:        entry["type"].(string),
-			Value:       entry["value"].(string),
-			ARN:         entry["arn"].(string),
+			Name:             entry["name"].(string),
+			Type:             entry["type"].(string),
+			Value:            entry["value"].(string),
+			ARN:              entry["arn"].(string),
 			LastModifiedDate: entry["last_modified_date"].(float64),
 		}
 
@@ -385,7 +385,7 @@ func (h *Handler) DescribeParameters(w http.ResponseWriter, r *http.Request) {
 			if len(filters) == 0 {
 				filters = req.Filters
 			}
-			
+
 			matched := true
 			for _, filter := range filters {
 				if filter.Key == "Name" {
@@ -409,11 +409,11 @@ func (h *Handler) DescribeParameters(w http.ResponseWriter, r *http.Request) {
 		}
 
 		metadata := ParameterMetadata{
-			Name:        entry["name"].(string),
-			Type:        entry["type"].(string),
-			Description: getString(entry, "description"),
-			KeyId:       getString(entry, "key_id"),
-			ARN:         entry["arn"].(string),
+			Name:             entry["name"].(string),
+			Type:             entry["type"].(string),
+			Description:      getString(entry, "description"),
+			KeyId:            getString(entry, "key_id"),
+			ARN:              entry["arn"].(string),
 			LastModifiedDate: entry["last_modified_date"].(float64),
 		}
 
@@ -601,4 +601,3 @@ func getString(m map[string]any, key string) string {
 	}
 	return ""
 }
-
