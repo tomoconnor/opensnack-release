@@ -6,6 +6,8 @@ package logs_test
 
 import (
 	"encoding/json"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -13,8 +15,6 @@ import (
 
 	"opensnack/internal/api/logs"
 	"opensnack/internal/resource"
-
-	"github.com/labstack/echo/v4"
 )
 
 //
@@ -44,7 +44,7 @@ func (m *MockStore) Update(r *resource.Resource) error {
 func (m *MockStore) Get(id, s, t, ns string) (*resource.Resource, error) {
 	v, ok := m.data[key(id, ns)]
 	if !ok {
-		return nil, echo.NewHTTPError(404)
+		return nil, errors.New("not found")
 	}
 	return &v, nil
 }
@@ -68,9 +68,7 @@ func (m *MockStore) Delete(id, s, t, ns string) error {
 // Helpers
 //
 
-func ctx(method, target string, body *strings.Reader, targetHeader string) (echo.Context, *httptest.ResponseRecorder, *echo.Echo) {
-	e := echo.New()
-
+func ctx(method, target string, body *strings.Reader, targetHeader string) (*httptest.ResponseRecorder, *http.Request) {
 	if body == nil {
 		body = strings.NewReader("")
 	}
@@ -78,10 +76,11 @@ func ctx(method, target string, body *strings.Reader, targetHeader string) (echo
 	req := httptest.NewRequest(method, target, body)
 	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
 	req.Header.Set("X-Amz-Target", targetHeader)
-	req.Header.Set("X-Opensnack-Namespace", "ns1")
+	// Namespace isolation travels in the User-Agent (see k6/README.md):
+	// Terraform cannot set custom headers, so a "custom-<ns>" suffix carries it.
+	req.Header.Set("User-Agent", "opensnack-test custom-ns1")
 
-	rec := httptest.NewRecorder()
-	return e.NewContext(req, rec), rec, e
+	return httptest.NewRecorder(), req
 }
 
 //
@@ -93,8 +92,8 @@ func TestCreateLogGroup(t *testing.T) {
 	h := logs.NewHandler(store)
 
 	body := `{"logGroupName":"MyGroup"}`
-	c, rec, _ := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.CreateLogGroup")
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.CreateLogGroup")
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -121,8 +120,8 @@ func TestDescribeLogGroups(t *testing.T) {
 		Attributes: buf,
 	})
 
-	c, rec, _ := ctx("POST", "/logs", strings.NewReader("{}"), "Logs_20140328.DescribeLogGroups")
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/logs", strings.NewReader("{}"), "Logs_20140328.DescribeLogGroups")
+	h.Dispatch(rec, req)
 
 	if !strings.Contains(rec.Body.String(), `"logGroupName":"G1"`) {
 		t.Fatalf("missing log group: %s", rec.Body.String())
@@ -134,8 +133,8 @@ func TestCreateLogStream(t *testing.T) {
 	h := logs.NewHandler(store)
 
 	body := `{"logGroupName":"GroupA","logStreamName":"Stream1"}`
-	c, rec, _ := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.CreateLogStream")
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.CreateLogStream")
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("got %d", rec.Code)
@@ -160,8 +159,8 @@ func TestDescribeLogStreams(t *testing.T) {
 	})
 
 	body := `{"logGroupName":"G2"}`
-	c, rec, _ := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.DescribeLogStreams")
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.DescribeLogStreams")
+	h.Dispatch(rec, req)
 
 	if !strings.Contains(rec.Body.String(), `"logStreamName":"S1"`) {
 		t.Fatalf("missing S1: %s", rec.Body.String())
@@ -173,9 +172,9 @@ func TestPutLogEvents(t *testing.T) {
 	h := logs.NewHandler(store)
 
 	body := `{"logGroupName":"G1","logStreamName":"S1","logEvents":[{"timestamp":1,"message":"hi"}]}`
-	c, rec, _ := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.PutLogEvents")
+	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.PutLogEvents")
 
-	_ = h.Dispatch(c)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)

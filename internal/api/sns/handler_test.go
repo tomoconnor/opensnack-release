@@ -6,6 +6,7 @@ package sns_test
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,8 +15,6 @@ import (
 
 	"opensnack/internal/api/sns"
 	"opensnack/internal/resource"
-
-	"github.com/labstack/echo/v4"
 )
 
 //
@@ -45,7 +44,7 @@ func (m *MockStore) Update(r *resource.Resource) error {
 func (m *MockStore) Get(id, service, typ, ns string) (*resource.Resource, error) {
 	v, ok := m.data[key(id, ns)]
 	if !ok {
-		return nil, echo.NewHTTPError(http.StatusNotFound)
+		return nil, errors.New("not found")
 	}
 	return &v, nil
 }
@@ -66,19 +65,18 @@ func (m *MockStore) Delete(id, service, typ, ns string) error {
 }
 
 // Helper
-func newCtx(method, target string, body *strings.Reader) (echo.Context, *httptest.ResponseRecorder, *echo.Echo) {
-	e := echo.New()
-
+func newCtx(method, target string, body *strings.Reader) (*httptest.ResponseRecorder, *http.Request) {
 	if body == nil {
 		body = strings.NewReader("")
 	}
 
 	req := httptest.NewRequest(method, target, body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Opensnack-Namespace", "ns1")
+	// Namespace isolation travels in the User-Agent (see k6/README.md):
+	// Terraform cannot set custom headers, so a "custom-<ns>" suffix carries it.
+	req.Header.Set("User-Agent", "opensnack-test custom-ns1")
 
-	rec := httptest.NewRecorder()
-	return e.NewContext(req, rec), rec, e
+	return httptest.NewRecorder(), req
 }
 
 //
@@ -90,12 +88,9 @@ func TestCreateTopic(t *testing.T) {
 	h := sns.NewHandler(store)
 
 	body := strings.NewReader("Name=mytopic")
-	c, rec, _ := newCtx("POST", "/sns?Action=CreateTopic", body)
+	rec, req := newCtx("POST", "/sns?Action=CreateTopic", body)
 
-	err := h.Dispatch(c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -111,12 +106,12 @@ func TestCreateTopic_Idempotent(t *testing.T) {
 	h := sns.NewHandler(store)
 
 	body := strings.NewReader("Name=dup")
-	c1, _, _ := newCtx("POST", "/sns?Action=CreateTopic", body)
-	_ = h.Dispatch(c1)
+	rec1, req1 := newCtx("POST", "/sns?Action=CreateTopic", body)
+	h.Dispatch(rec1, req1)
 
 	body2 := strings.NewReader("Name=dup")
-	c2, rec2, _ := newCtx("POST", "/sns?Action=CreateTopic", body2)
-	_ = h.Dispatch(c2)
+	rec2, req2 := newCtx("POST", "/sns?Action=CreateTopic", body2)
+	h.Dispatch(rec2, req2)
 
 	if rec2.Code != 200 {
 		t.Fatalf("expected 200 for idempotent create")
@@ -141,8 +136,8 @@ func TestListTopics(t *testing.T) {
 		})
 	}
 
-	c, rec, _ := newCtx("POST", "/sns?Action=ListTopics", nil)
-	_ = h.Dispatch(c)
+	rec, req := newCtx("POST", "/sns?Action=ListTopics", nil)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -169,8 +164,8 @@ func TestDeleteTopic(t *testing.T) {
 
 	arn := "arn:aws:sns:us-east-1:000000000000:" + name
 
-	c, rec, _ := newCtx("POST", "/sns?Action=DeleteTopic&TopicArn="+arn, nil)
-	_ = h.Dispatch(c)
+	rec, req := newCtx("POST", "/sns?Action=DeleteTopic&TopicArn="+arn, nil)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -182,9 +177,9 @@ func TestPublish(t *testing.T) {
 	h := sns.NewHandler(store)
 
 	body := strings.NewReader("Message=hello")
-	c, rec, _ := newCtx("POST", "/sns?Action=Publish", body)
+	rec, req := newCtx("POST", "/sns?Action=Publish", body)
 
-	_ = h.Dispatch(c)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -192,5 +187,28 @@ func TestPublish(t *testing.T) {
 
 	if !strings.Contains(rec.Body.String(), "<MessageId>") {
 		t.Fatalf("Publish should return MessageId")
+	}
+}
+
+// Regression: these handlers wrote an error but carried on to dereference the
+// nil resource, panicking the connection instead of returning NotFound.
+func TestMissingTopicDoesNotPanic(t *testing.T) {
+	arn := "arn:aws:sns:us-east-1:000000000000:ghost"
+
+	for name, target := range map[string]string{
+		"GetTopicAttributes":        "/sns?Action=GetTopicAttributes&TopicArn=" + arn,
+		"SetTopicAttributes":        "/sns?Action=SetTopicAttributes&TopicArn=" + arn + "&AttributeName=DisplayName&AttributeValue=x",
+		"GetSubscriptionAttributes": "/sns?Action=GetSubscriptionAttributes&SubscriptionArn=" + arn + ":sub",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := sns.NewHandler(NewMockStore())
+
+			rec, req := newCtx("POST", target, nil)
+			h.Dispatch(rec, req)
+
+			if rec.Code == 200 {
+				t.Fatalf("expected an error status, got 200: %s", rec.Body.String())
+			}
+		})
 	}
 }

@@ -6,14 +6,15 @@ package s3_test
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/labstack/echo/v4"
+	"time"
 
 	"opensnack/internal/api/s3"
 	"opensnack/internal/resource"
@@ -50,7 +51,7 @@ func (m *MockStore) Update(r *resource.Resource) error {
 func (m *MockStore) Get(id, service, typ, ns string) (*resource.Resource, error) {
 	v, ok := m.data[key(id, ns)]
 	if !ok {
-		return nil, echo.NewHTTPError(404)
+		return nil, errors.New("not found")
 	}
 	return &v, nil
 }
@@ -74,9 +75,7 @@ func (m *MockStore) Delete(id, service, typ, ns string) error {
 // Test helpers
 //
 
-func newCtx(method, path string, body []byte) (echo.Context, *httptest.ResponseRecorder, *echo.Echo) {
-	e := echo.New()
-
+func newCtx(method, path string, body []byte) (*httptest.ResponseRecorder, *http.Request) {
 	var rdr io.Reader
 	if body == nil {
 		rdr = strings.NewReader("")
@@ -84,25 +83,14 @@ func newCtx(method, path string, body []byte) (echo.Context, *httptest.ResponseR
 		rdr = bytes.NewReader(body)
 	}
 
+	// The handlers derive bucket and key from r.URL.Path via extractBucketKey,
+	// so the path alone is enough here.
 	req := httptest.NewRequest(method, path, rdr)
-	rec := httptest.NewRecorder()
-	req.Header.Set("X-Opensnack-Namespace", "ns1")
+	// Namespace isolation travels in the User-Agent (see k6/README.md):
+	// Terraform cannot set custom headers, so a "custom-<ns>" suffix carries it.
+	req.Header.Set("User-Agent", "opensnack-test custom-ns1")
 
-	c := e.NewContext(req, rec)
-
-	// Infer bucket and key from the path: /bucket/key...
-	parts := strings.SplitN(strings.TrimPrefix(path, "/"), "/", 2)
-
-	bucket := parts[0]
-	key := ""
-	if len(parts) > 1 {
-		key = parts[1]
-	}
-
-	c.SetParamNames("bucket", "*")
-	c.SetParamValues(bucket, key)
-
-	return c, rec, e
+	return httptest.NewRecorder(), req
 }
 
 //
@@ -139,12 +127,9 @@ func TestPutAndGetObject(t *testing.T) {
 
 	// PUT object
 	body := []byte("hello world")
-	c, rec, _ := newCtx("PUT", "/mybucket/hello.txt", body)
+	rec, req := newCtx("PUT", "/mybucket/hello.txt", body)
 
-	err := h.PutObject(c)
-	if err != nil {
-		t.Fatalf("PutObject error: %v", err)
-	}
+	h.PutObject(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -161,11 +146,8 @@ func TestPutAndGetObject(t *testing.T) {
 	}
 
 	// GET object
-	c2, rec2, _ := newCtx("GET", "/mybucket/hello.txt", nil)
-	err = h.GetObject(c2)
-	if err != nil {
-		t.Fatalf("GetObject error: %v", err)
-	}
+	rec2, req2 := newCtx("GET", "/mybucket/hello.txt", nil)
+	h.GetObject(rec2, req2)
 
 	if rec2.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec2.Code)
@@ -191,15 +173,12 @@ func TestHeadObject(t *testing.T) {
 
 	// PUT first
 	body := []byte("abc123")
-	c, _, _ := newCtx("PUT", "/bucket1/x.txt", body)
-	h.PutObject(c)
+	rec, req := newCtx("PUT", "/bucket1/x.txt", body)
+	h.PutObject(rec, req)
 
 	// HEAD now
-	c2, rec2, _ := newCtx("HEAD", "/bucket1/x.txt", nil)
-	err := h.HeadObject(c2)
-	if err != nil {
-		t.Fatalf("HeadObject error: %v", err)
-	}
+	rec2, req2 := newCtx("HEAD", "/bucket1/x.txt", nil)
+	h.HeadObject(rec2, req2)
 
 	if rec2.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec2.Code)
@@ -229,8 +208,8 @@ func TestDeleteObject(t *testing.T) {
 
 	// PUT object
 	body := []byte("zzz")
-	c, _, _ := newCtx("PUT", "/b1/a/b/c.txt", body)
-	h.PutObject(c)
+	rec, req := newCtx("PUT", "/b1/a/b/c.txt", body)
+	h.PutObject(rec, req)
 
 	path := filepath.Join(root, "ns1", "b1", "a", "b", "c.txt")
 
@@ -239,8 +218,8 @@ func TestDeleteObject(t *testing.T) {
 	}
 
 	// DELETE
-	c2, rec2, _ := newCtx("DELETE", "/b1/a/b/c.txt", nil)
-	h.DeleteObject(c2)
+	rec2, req2 := newCtx("DELETE", "/b1/a/b/c.txt", nil)
+	h.DeleteObject(rec2, req2)
 
 	if rec2.Code != 204 {
 		t.Fatalf("expected 204, got %d", rec2.Code)
@@ -259,14 +238,11 @@ func TestNoSuchBucket(t *testing.T) {
 
 	body := []byte("abc")
 
-	c, rec, _ := newCtx("PUT", "/idontexist/k.txt", body)
-	err := h.PutObject(c)
+	rec, req := newCtx("PUT", "/idontexist/k.txt", body)
+	h.PutObject(rec, req)
 
-	if err == nil {
-		// handler returned XML directly, not an error
-		if rec.Code != 404 {
-			t.Fatalf("expected 404 for NoSuchBucket; got %d", rec.Code)
-		}
+	if rec.Code != 404 {
+		t.Fatalf("expected 404 for NoSuchBucket; got %d", rec.Code)
 	}
 }
 
@@ -284,13 +260,11 @@ func TestNoSuchKey(t *testing.T) {
 
 	h := s3.NewHandler(store)
 
-	c, rec, _ := newCtx("GET", "/b2/nothing/here.txt", nil)
-	err := h.GetObject(c)
+	rec, req := newCtx("GET", "/b2/nothing/here.txt", nil)
+	h.GetObject(rec, req)
 
-	if err == nil {
-		if rec.Code != 404 {
-			t.Fatalf("expected 404 for missing key, got %d", rec.Code)
-		}
+	if rec.Code != 404 {
+		t.Fatalf("expected 404 for missing key, got %d", rec.Code)
 	}
 }
 
@@ -309,8 +283,8 @@ func TestBinaryUpload(t *testing.T) {
 
 	// Binary body
 	body := []byte{0x00, 0xFF, 0xAA, 0x55}
-	c, rec, _ := newCtx("PUT", "/binbucket/file.bin", body)
-	h.PutObject(c)
+	rec, req := newCtx("PUT", "/binbucket/file.bin", body)
+	h.PutObject(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200")
@@ -325,10 +299,45 @@ func TestBinaryUpload(t *testing.T) {
 	}
 
 	// GET and compare
-	c2, rec2, _ := newCtx("GET", "/binbucket/file.bin", nil)
-	h.GetObject(c2)
+	rec2, req2 := newCtx("GET", "/binbucket/file.bin", nil)
+	h.GetObject(rec2, req2)
 
 	if !bytes.Equal(rec2.Body.Bytes(), body) {
 		t.Fatalf("GET returned wrong binary data")
+	}
+}
+
+// Regression: object responses omitted Last-Modified, which the AWS CLI requires
+// — `aws s3 cp` down failed with "fatal error: 'LastModified'".
+func TestObjectResponsesCarryLastModified(t *testing.T) {
+	tempObjectRoot(t)
+	store := NewMockStore()
+	store.Create(&resource.Resource{
+		ID: "lmb", Namespace: "ns1", Service: "s3", Type: "bucket",
+	})
+	h := s3.NewHandler(store)
+
+	rec, req := newCtx("PUT", "/lmb/f.txt", []byte("data"))
+	h.PutObject(rec, req)
+
+	for name, call := range map[string]http.HandlerFunc{
+		"GetObject":  h.GetObject,
+		"HeadObject": h.HeadObject,
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec, req := newCtx("GET", "/lmb/f.txt", nil)
+			call(rec, req)
+
+			if rec.Code != 200 {
+				t.Fatalf("expected 200, got %d", rec.Code)
+			}
+			lm := rec.Header().Get("Last-Modified")
+			if lm == "" {
+				t.Fatal("Last-Modified header missing")
+			}
+			if _, err := time.Parse(http.TimeFormat, lm); err != nil {
+				t.Fatalf("Last-Modified is not an HTTP date: %q", lm)
+			}
+		})
 	}
 }

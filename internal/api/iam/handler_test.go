@@ -7,6 +7,8 @@ package iam_test
 import (
 	"encoding/json"
 	"encoding/xml"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -14,8 +16,6 @@ import (
 
 	"opensnack/internal/api/iam"
 	"opensnack/internal/resource"
-
-	"github.com/labstack/echo/v4"
 )
 
 //
@@ -47,7 +47,7 @@ func (m *MockStore) Update(r *resource.Resource) error {
 func (m *MockStore) Get(id, service, typ, ns string) (*resource.Resource, error) {
 	v, ok := m.data[key(id, ns)]
 	if !ok {
-		return nil, echo.NewHTTPError(404)
+		return nil, errors.New("not found")
 	}
 	return &v, nil
 }
@@ -71,19 +71,18 @@ func (m *MockStore) Delete(id, service, typ, ns string) error {
 // Test helper
 //
 
-func ctx(method, target string, body *strings.Reader) (echo.Context, *httptest.ResponseRecorder, *echo.Echo) {
-	e := echo.New()
-
+func ctx(method, target string, body *strings.Reader) (*httptest.ResponseRecorder, *http.Request) {
 	if body == nil {
 		body = strings.NewReader("")
 	}
 
 	req := httptest.NewRequest(method, target, body)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("X-Opensnack-Namespace", "ns1")
+	// Namespace isolation travels in the User-Agent (see k6/README.md):
+	// Terraform cannot set custom headers, so a "custom-<ns>" suffix carries it.
+	req.Header.Set("User-Agent", "opensnack-test custom-ns1")
 
-	rec := httptest.NewRecorder()
-	return e.NewContext(req, rec), rec, e
+	return httptest.NewRecorder(), req
 }
 
 //
@@ -97,12 +96,9 @@ func TestCreateRole(t *testing.T) {
 	h := iam.NewHandler(store)
 
 	body := strings.NewReader(`RoleName=MyRole&AssumeRolePolicyDocument=%7B%7D`)
-	c, rec, _ := ctx("POST", "/iam?Action=CreateRole", body)
+	rec, req := ctx("POST", "/iam?Action=CreateRole", body)
 
-	err := h.Dispatch(c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -122,12 +118,12 @@ func TestCreateRole_Idempotent(t *testing.T) {
 	h := iam.NewHandler(store)
 
 	body := strings.NewReader(`RoleName=SameRole&AssumeRolePolicyDocument=%7B%7D`)
-	c1, _, _ := ctx("POST", "/iam?Action=CreateRole", body)
-	_ = h.Dispatch(c1)
+	rec1, req1 := ctx("POST", "/iam?Action=CreateRole", body)
+	h.Dispatch(rec1, req1)
 
 	body2 := strings.NewReader(`RoleName=SameRole&AssumeRolePolicyDocument=%7B%7D`)
-	c2, rec2, _ := ctx("POST", "/iam?Action=CreateRole", body2)
-	_ = h.Dispatch(c2)
+	rec2, req2 := ctx("POST", "/iam?Action=CreateRole", body2)
+	h.Dispatch(rec2, req2)
 
 	if rec2.Code != 200 {
 		t.Fatalf("idempotent create returned %d", rec2.Code)
@@ -153,8 +149,8 @@ func TestGetRole(t *testing.T) {
 		Attributes: buf,
 	})
 
-	c, rec, _ := ctx("POST", "/iam?Action=GetRole&RoleName=FetchRole", nil)
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/iam?Action=GetRole&RoleName=FetchRole", nil)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -180,8 +176,8 @@ func TestDeleteRole(t *testing.T) {
 		Attributes: buf,
 	})
 
-	c, rec, _ := ctx("POST", "/iam?Action=DeleteRole&RoleName=KillRole", nil)
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/iam?Action=DeleteRole&RoleName=KillRole", nil)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("delete returned %d", rec.Code)
@@ -197,12 +193,9 @@ func TestCreatePolicy(t *testing.T) {
 	h := iam.NewHandler(store)
 
 	body := strings.NewReader(`PolicyName=MyPolicy&PolicyDocument=%7B%7D`)
-	c, rec, _ := ctx("POST", "/iam?Action=CreatePolicy", body)
+	rec, req := ctx("POST", "/iam?Action=CreatePolicy", body)
 
-	err := h.Dispatch(c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -233,8 +226,8 @@ func TestGetPolicy(t *testing.T) {
 	})
 
 	arn := "arn:aws:iam::000000000000:policy/FetchPolicy"
-	c, rec, _ := ctx("POST", "/iam?Action=GetPolicy&PolicyArn="+arn, nil)
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/iam?Action=GetPolicy&PolicyArn="+arn, nil)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200")
@@ -267,8 +260,8 @@ func TestGetPolicyVersion(t *testing.T) {
 	arn := "arn:aws:iam::000000000000:policy/VersionedPolicy"
 	url := "/iam?Action=GetPolicyVersion&PolicyArn=" + arn + "&VersionId=v1"
 
-	c, rec, _ := ctx("POST", url, nil)
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", url, nil)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200")
@@ -283,11 +276,11 @@ func TestAttachRolePolicy(t *testing.T) {
 	store := NewMockStore()
 	h := iam.NewHandler(store)
 
-	c, rec, _ := ctx("POST",
+	rec, req := ctx("POST",
 		"/iam?Action=AttachRolePolicy&RoleName=R1&PolicyArn=arn:aws:iam::000000000000:policy/P1",
 		nil,
 	)
-	_ = h.Dispatch(c)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200")
@@ -320,8 +313,8 @@ func TestListAttachedRolePolicies(t *testing.T) {
 		Attributes: buf,
 	})
 
-	c, rec, _ := ctx("POST", "/iam?Action=ListAttachedRolePolicies&RoleName=R2", nil)
-	_ = h.Dispatch(c)
+	rec, req := ctx("POST", "/iam?Action=ListAttachedRolePolicies&RoleName=R2", nil)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200")
@@ -354,11 +347,11 @@ func TestDetachRolePolicy(t *testing.T) {
 		Attributes: buf,
 	})
 
-	c, rec, _ := ctx("POST",
+	rec, req := ctx("POST",
 		"/iam?Action=DetachRolePolicy&RoleName=DetachR&PolicyArn=arn:aws:iam::000000000000:policy/DetachP",
 		nil,
 	)
-	_ = h.Dispatch(c)
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)
@@ -366,5 +359,31 @@ func TestDetachRolePolicy(t *testing.T) {
 
 	if _, err := store.Get("DetachR:DetachP", "iam", "attachment", "ns1"); err == nil {
 		t.Fatalf("attachment should be deleted")
+	}
+}
+
+// Regression: these handlers wrote a 404 but carried on to dereference the nil
+// resource, panicking the connection instead of returning NoSuchEntity.
+func TestMissingPolicyDoesNotPanic(t *testing.T) {
+	arn := "arn:aws:iam::000000000000:policy/ghost"
+
+	for name, target := range map[string]string{
+		"GetPolicy":          "/iam?Action=GetPolicy&PolicyArn=" + arn,
+		"GetPolicyVersion":   "/iam?Action=GetPolicyVersion&PolicyArn=" + arn + "&VersionId=v1",
+		"ListPolicyVersions": "/iam?Action=ListPolicyVersions&PolicyArn=" + arn,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := iam.NewHandler(NewMockStore())
+
+			rec, req := ctx("POST", target, nil)
+			h.Dispatch(rec, req)
+
+			if rec.Code != 404 {
+				t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(rec.Body.String(), "NoSuchEntity") {
+				t.Fatalf("expected NoSuchEntity, got: %s", rec.Body.String())
+			}
+		})
 	}
 }

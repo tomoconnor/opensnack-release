@@ -6,31 +6,25 @@ package sts_test
 
 import (
 	"encoding/xml"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"opensnack/internal/api/sts"
-
-	"github.com/labstack/echo/v4"
 )
 
-func newCtx(method, target string) (echo.Context, *httptest.ResponseRecorder, *echo.Echo) {
-	e := echo.New()
+func newCtx(method, target string) (*httptest.ResponseRecorder, *http.Request) {
 	req := httptest.NewRequest(method, target, strings.NewReader(""))
-	rec := httptest.NewRecorder()
-	return e.NewContext(req, rec), rec, e
+	return httptest.NewRecorder(), req
 }
 
 func TestGetCallerIdentity(t *testing.T) {
 	h := sts.NewHandler()
 
-	c, rec, _ := newCtx("POST", "/sts?Action=GetCallerIdentity")
+	rec, req := newCtx("POST", "/sts?Action=GetCallerIdentity")
 
-	err := h.Dispatch(c)
-	if err != nil {
-		t.Fatal(err)
-	}
+	h.Dispatch(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("expected 200, got %d", rec.Code)

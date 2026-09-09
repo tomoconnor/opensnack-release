@@ -10,22 +10,16 @@ import (
 	"testing"
 
 	"opensnack/internal/awsresponses"
-
-	"github.com/labstack/echo/v4"
 )
 
-func newCtx(method, path string) (echo.Context, *httptest.ResponseRecorder) {
-	e := echo.New()
-	req := httptest.NewRequest(method, path, nil)
-	rec := httptest.NewRecorder()
-	ctx := e.NewContext(req, rec)
-	return ctx, rec
+func newRec() *httptest.ResponseRecorder {
+	return httptest.NewRecorder()
 }
 
 func TestWriteEmpty200(t *testing.T) {
-	c, rec := newCtx("GET", "/")
+	rec := newRec()
 
-	err := awsresponses.WriteEmpty200(c, map[string]string{"Location": "/test"})
+	err := awsresponses.WriteEmpty200(rec, map[string]string{"Location": "/test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,9 +36,9 @@ func TestWriteEmpty200(t *testing.T) {
 }
 
 func TestWriteEmpty204(t *testing.T) {
-	c, rec := newCtx("DELETE", "/xyz")
+	rec := newRec()
 
-	err := awsresponses.WriteEmpty204(c)
+	err := awsresponses.WriteEmpty204(rec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,10 +60,13 @@ func TestRequestIDSequence(t *testing.T) {
 	}
 }
 
+// WriteErrorXML emits the Query API shape, which wraps the error in
+// <ErrorResponse> and carries no <Resource>. WriteS3ErrorXML is the one that
+// reports the resource.
 func TestWriteErrorXML(t *testing.T) {
-	c, rec := newCtx("GET", "/bad")
+	rec := newRec()
 
-	err := awsresponses.WriteErrorXML(c, 404, "NoSuchBucket", "Bucket does not exist", "foo")
+	err := awsresponses.WriteErrorXML(rec, 404, "NoSuchBucket", "Bucket does not exist", "foo")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,10 +76,40 @@ func TestWriteErrorXML(t *testing.T) {
 	}
 
 	body := rec.Body.String()
-	if !strings.Contains(body, "<Code>NoSuchBucket</Code>") {
-		t.Fatalf("expected NoSuchBucket in error: %s", body)
+	for _, want := range []string{
+		"<ErrorResponse>",
+		"<Type>Sender</Type>",
+		"<Code>NoSuchBucket</Code>",
+		"<Message>Bucket does not exist</Message>",
+		"<RequestId>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %s in error: %s", want, body)
+		}
 	}
-	if !strings.Contains(body, "<Resource>foo</Resource>") {
-		t.Fatalf("expected Resource in error")
+}
+
+func TestWriteS3ErrorXML(t *testing.T) {
+	rec := newRec()
+
+	err := awsresponses.WriteS3ErrorXML(rec, 404, "NoSuchBucket", "Bucket does not exist", "foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if rec.Code != 404 {
+		t.Fatalf("expected 404, got %d", rec.Code)
+	}
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		"<Code>NoSuchBucket</Code>",
+		"<Message>Bucket does not exist</Message>",
+		"<Resource>foo</Resource>",
+		"<RequestId>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("expected %s in error: %s", want, body)
+		}
 	}
 }
