@@ -832,6 +832,7 @@ func (h *Handler) GetPolicy(w http.ResponseWriter, r *http.Request) {
 	res, err := h.Store.Get(name, "iam", "policy", ns)
 	if err != nil {
 		awsresponses.WriteErrorXML(w, 404, "NoSuchEntity", "Policy does not exist", name)
+		return
 	}
 
 	var attr map[string]any
@@ -900,6 +901,7 @@ func (h *Handler) GetPolicyVersion(w http.ResponseWriter, r *http.Request) {
 	res, err := h.Store.Get(name, "iam", "policy", ns)
 	if err != nil {
 		awsresponses.WriteErrorXML(w, 404, "NoSuchEntity", "Policy missing", arn)
+		return
 	}
 
 	var attr map[string]any
@@ -947,6 +949,7 @@ func (h *Handler) ListPolicyVersions(w http.ResponseWriter, r *http.Request) {
 	res, err := h.Store.Get(name, "iam", "policy", ns)
 	if err != nil {
 		awsresponses.WriteErrorXML(w, 404, "NoSuchEntity", "Policy does not exist", name)
+		return
 	}
 
 	var attr map[string]any

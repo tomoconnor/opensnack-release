@@ -104,12 +104,14 @@ func (h *Handler) CreateBucket(w http.ResponseWriter, r *http.Request) {
 
 		if err := h.Store.Create(res); err != nil {
 			awsresponses.WriteJSON(w, 500, err.Error())
+			return
 		}
 
 		// AWS-style empty body
 		awsresponses.WriteEmpty200(w, map[string]string{
 			"Location": "/" + bucket,
 		})
+		return
 	}
 
 	// XML mode — parse body
@@ -142,6 +144,7 @@ func (h *Handler) CreateBucket(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.Store.Create(res); err != nil {
 		awsresponses.WriteJSON(w, 500, err.Error())
+		return
 	}
 
 	resp := CreateBucketResult{
@@ -333,6 +336,7 @@ func (h *Handler) GetBucketVersioning(w http.ResponseWriter, r *http.Request) {
 			"The specified bucket does not exist",
 			bucket,
 		)
+		return
 	}
 
 	attr := make(map[string]any)
@@ -374,6 +378,7 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 			"The specified bucket does not exist",
 			bucket,
 		)
+		return
 	}
 
 	// Parse lifecycle configuration from XML body
@@ -484,6 +489,7 @@ func (h *Handler) GetBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 			"The specified bucket does not exist",
 			bucket,
 		)
+		return
 	}
 
 	attr := make(map[string]any)
@@ -782,6 +788,7 @@ func (h *Handler) GetBucketAcl(w http.ResponseWriter, r *http.Request) {
 			"The specified bucket does not exist",
 			bucket,
 		)
+		return
 	}
 
 	attr := make(map[string]any)

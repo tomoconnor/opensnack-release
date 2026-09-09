@@ -280,6 +280,7 @@ func (h *Handler) GetTopicAttributes(w http.ResponseWriter, r *http.Request) {
 			"Topic does not exist",
 			arn,
 		)
+		return
 	}
 
 	// Parse stored attributes
@@ -408,6 +409,7 @@ func (h *Handler) SetTopicAttributes(w http.ResponseWriter, r *http.Request) {
 			"Topic does not exist",
 			arn,
 		)
+		return
 	}
 
 	// Parse existing attributes
@@ -713,6 +715,7 @@ func (h *Handler) GetSubscriptionAttributes(w http.ResponseWriter, r *http.Reque
 			"Subscription does not exist",
 			subscriptionArn,
 		)
+		return
 	}
 
 	// Parse stored attributes

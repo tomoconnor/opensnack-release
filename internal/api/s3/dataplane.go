@@ -176,6 +176,17 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 // GET OBJECT
 //
 
+// lastModified renders the stored created_at as an HTTP date. The AWS CLI
+// requires Last-Modified on object responses and fails the transfer without it.
+func lastModified(meta map[string]any) string {
+	created, _ := meta["created_at"].(string)
+	t, err := time.Parse(time.RFC3339, created)
+	if err != nil {
+		t = time.Now().UTC()
+	}
+	return t.UTC().Format(http.TimeFormat)
+}
+
 func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	ns := util.NamespaceFromHeader(r)
 	bucket, key := extractBucketKey(r.URL.Path)
@@ -212,6 +223,8 @@ func (h *Handler) GetObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+	w.Header().Set("Last-Modified", lastModified(meta))
+	w.Header().Set("Accept-Ranges", "bytes")
 	w.WriteHeader(200)
 	w.Write(bodyBytes)
 }
@@ -247,6 +260,8 @@ func (h *Handler) HeadObject(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", fmt.Sprintf("%d", size))
+	w.Header().Set("Last-Modified", lastModified(meta))
+	w.Header().Set("Accept-Ranges", "bytes")
 	w.WriteHeader(200)
 }
 
