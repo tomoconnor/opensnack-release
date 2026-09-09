@@ -88,6 +88,19 @@ func New(store resource.Store) http.Handler {
 
 		// If path is empty (root "/"), handle query dispatch or ListBuckets
 		if path == "" {
+			// JSON-protocol services (KMS, DynamoDB, Logs, SecretsManager, SSM)
+			// are addressed by X-Amz-Target at the root, which is where every AWS
+			// SDK and the CLI send them. The per-service paths below are an
+			// opensnack convenience, not something a real client ever uses.
+			if h := jsonTargetHandler(r, kmsh, dynamoh, logsh, secretsmanagerh, ssmh); h != nil {
+				if r.Method != "POST" {
+					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+					return
+				}
+				h(w, r)
+				return
+			}
+
 			if r.Method == "GET" {
 				action := getFormValue(r, "Action")
 				if action != "" {
@@ -317,6 +330,36 @@ func New(store resource.Store) http.Handler {
 	// S3 routes are handled by rootHandler above
 
 	return handler
+}
+
+// jsonTargetHandler maps an X-Amz-Target header to the handler that owns that
+// service, or nil when the request is not a JSON-protocol call.
+func jsonTargetHandler(
+	r *http.Request,
+	kmsh *kms.Handler,
+	ddbh *dynamodb.Handler,
+	logsh *logs.Handler,
+	smh *secretsmanager.Handler,
+	ssmh *ssm.Handler,
+) http.HandlerFunc {
+	target := r.Header.Get("X-Amz-Target")
+	if target == "" {
+		return nil
+	}
+
+	switch {
+	case strings.HasPrefix(target, "TrentService."):
+		return kmsh.Dispatch
+	case strings.HasPrefix(target, "DynamoDB_"):
+		return ddbh.Dispatch
+	case strings.HasPrefix(target, "Logs_"):
+		return logsh.Dispatch
+	case strings.HasPrefix(target, "secretsmanager."):
+		return smh.Dispatch
+	case strings.HasPrefix(target, "AmazonSSM."):
+		return ssmh.Dispatch
+	}
+	return nil
 }
 
 func queryDispatch(w http.ResponseWriter, r *http.Request, stsh *sts.Handler, iamh *iam.Handler, sqsh *sqs.Handler, snsh *sns.Handler) {

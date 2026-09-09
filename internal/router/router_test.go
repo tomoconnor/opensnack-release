@@ -6,6 +6,7 @@ package router_test
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -66,7 +67,7 @@ func TestRouter_ListBucketsRoute(t *testing.T) {
 	e := router.New(store)
 
 	req := httptest.NewRequest("GET", "/", nil)
-	req.Header.Set("X-Opensnack-Namespace", "ns")
+	req.Header.Set("User-Agent", "opensnack-test custom-ns")
 	rec := httptest.NewRecorder()
 
 	e.ServeHTTP(rec, req)
@@ -81,7 +82,7 @@ func TestRouter_CreateBucketRoute(t *testing.T) {
 	e := router.New(store)
 
 	req := httptest.NewRequest("PUT", "/abc", nil)
-	req.Header.Set("X-Opensnack-Namespace", "ns")
+	req.Header.Set("User-Agent", "opensnack-test custom-ns")
 	rec := httptest.NewRecorder()
 
 	e.ServeHTTP(rec, req)
@@ -96,7 +97,7 @@ func TestRouter_DeleteBucketRoute(t *testing.T) {
 	e := router.New(store)
 
 	req := httptest.NewRequest("DELETE", "/dead", nil)
-	req.Header.Set("X-Opensnack-Namespace", "ns")
+	req.Header.Set("User-Agent", "opensnack-test custom-ns")
 	rec := httptest.NewRecorder()
 
 	e.ServeHTTP(rec, req)
@@ -124,7 +125,7 @@ func TestRouter_HeadBucketRoute(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("HEAD", "/head", nil)
-	req.Header.Set("X-Opensnack-Namespace", "ns")
+	req.Header.Set("User-Agent", "opensnack-test custom-ns")
 	rec := httptest.NewRecorder()
 
 	e.ServeHTTP(rec, req)
@@ -150,7 +151,9 @@ func TestRouter_LocationQueryRoute(t *testing.T) {
 	})
 
 	req := httptest.NewRequest("GET", "/loc?location", nil)
-	req.Header.Set("X-Opensnack-Namespace", "ns1")
+	// Namespace isolation travels in the User-Agent (see k6/README.md):
+	// Terraform cannot set custom headers, so a "custom-<ns>" suffix carries it.
+	req.Header.Set("User-Agent", "opensnack-test custom-ns1")
 	rec := httptest.NewRecorder()
 
 	e.ServeHTTP(rec, req)
@@ -160,5 +163,33 @@ func TestRouter_LocationQueryRoute(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "<LocationConstraint>") {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
+	}
+}
+
+// Regression: JSON-protocol services are addressed by X-Amz-Target at the root,
+// which is where every AWS SDK and the CLI send them. They used to 405 there and
+// were only reachable at opensnack's own /kms, /dynamodb, ... paths.
+func TestRouter_JSONTargetAtRoot(t *testing.T) {
+	for name, target := range map[string]string{
+		"kms":            "TrentService.ListKeys",
+		"dynamodb":       "DynamoDB_20120810.ListTables",
+		"logs":           "Logs_20140328.DescribeLogGroups",
+		"secretsmanager": "secretsmanager.ListSecrets",
+		"ssm":            "AmazonSSM.DescribeParameters",
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := router.New(NewMockStore())
+
+			req := httptest.NewRequest("POST", "/", strings.NewReader("{}"))
+			req.Header.Set("X-Amz-Target", target)
+			req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+			rec := httptest.NewRecorder()
+
+			e.ServeHTTP(rec, req)
+
+			if rec.Code == http.StatusMethodNotAllowed {
+				t.Fatalf("%s: root dispatch returned 405; X-Amz-Target not routed", target)
+			}
+		})
 	}
 }
