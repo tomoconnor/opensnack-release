@@ -29,6 +29,9 @@ services:
       - checkpoint_completion_target=0.9
     volumes:
       - pgdata:/var/lib/postgresql
+      # Creates the resources table on first start of an empty data volume.
+      # Without this a fresh deployment has no schema and every request fails.
+      - ./internal/db/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
     restart: unless-stopped
 
   opensnack:

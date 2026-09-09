@@ -67,3 +67,10 @@ override.tf.json
 # Ignore CLI configuration files
 .terraformrc
 terraform.rc
+
+# Runtime log written by the server (see internal/logging/logger.go)
+opensnack.log
+opensnack.log.*
+
+# macOS
+.DS_Store
