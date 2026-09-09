@@ -80,28 +80,63 @@ type GetKeyRotationStatusOutput struct {
 
 // ListResourceTagsInput represents the request to list tags for a KMS key
 type ListResourceTagsInput struct {
-	KeyID   string `json:"KeyId"`
-	Marker  string `json:"Marker,omitempty"`
-	Limit   int32  `json:"Limit,omitempty"`
+	KeyID  string `json:"KeyId"`
+	Marker string `json:"Marker,omitempty"`
+	Limit  int32  `json:"Limit,omitempty"`
 }
 
 // ListResourceTagsOutput represents the response from listing tags for a KMS key
 type ListResourceTagsOutput struct {
-	Tags      []Tag `json:"Tags"`
-	Truncated bool  `json:"Truncated"`
+	Tags       []Tag  `json:"Tags"`
+	Truncated  bool   `json:"Truncated"`
 	NextMarker string `json:"NextMarker,omitempty"`
 }
 
 // ScheduleKeyDeletionInput represents the request to schedule key deletion
 type ScheduleKeyDeletionInput struct {
-	KeyID              string `json:"KeyId"`
-	PendingWindowInDays int32 `json:"PendingWindowInDays,omitempty"`
+	KeyID               string `json:"KeyId"`
+	PendingWindowInDays int32  `json:"PendingWindowInDays,omitempty"`
 }
 
 // ScheduleKeyDeletionOutput represents the response from scheduling key deletion
 type ScheduleKeyDeletionOutput struct {
-	KeyID              string  `json:"KeyId"`
-	DeletionDate       float64 `json:"DeletionDate"`
-	KeyState           string  `json:"KeyState"`
-	PendingWindowInDays int32  `json:"PendingWindowInDays"`
+	KeyID               string  `json:"KeyId"`
+	DeletionDate        float64 `json:"DeletionDate"`
+	KeyState            string  `json:"KeyState"`
+	PendingWindowInDays int32   `json:"PendingWindowInDays"`
+}
+
+// EncryptInput represents the request to encrypt plaintext under a KMS key.
+// Plaintext is a []byte so encoding/json handles the base64 blob encoding that
+// the KMS wire format uses.
+type EncryptInput struct {
+	KeyID               string            `json:"KeyId"`
+	Plaintext           []byte            `json:"Plaintext"`
+	EncryptionContext   map[string]string `json:"EncryptionContext,omitempty"`
+	EncryptionAlgorithm string            `json:"EncryptionAlgorithm,omitempty"`
+	GrantTokens         []string          `json:"GrantTokens,omitempty"`
+}
+
+// EncryptOutput represents the response from encrypting plaintext
+type EncryptOutput struct {
+	CiphertextBlob      []byte `json:"CiphertextBlob"`
+	KeyID               string `json:"KeyId"`
+	EncryptionAlgorithm string `json:"EncryptionAlgorithm"`
+}
+
+// DecryptInput represents the request to decrypt a ciphertext blob. KeyId is
+// optional for symmetric keys: the blob names the key it was sealed under.
+type DecryptInput struct {
+	CiphertextBlob      []byte            `json:"CiphertextBlob"`
+	KeyID               string            `json:"KeyId,omitempty"`
+	EncryptionContext   map[string]string `json:"EncryptionContext,omitempty"`
+	EncryptionAlgorithm string            `json:"EncryptionAlgorithm,omitempty"`
+	GrantTokens         []string          `json:"GrantTokens,omitempty"`
+}
+
+// DecryptOutput represents the response from decrypting a ciphertext blob
+type DecryptOutput struct {
+	KeyID               string `json:"KeyId"`
+	Plaintext           []byte `json:"Plaintext"`
+	EncryptionAlgorithm string `json:"EncryptionAlgorithm"`
 }

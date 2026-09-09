@@ -5,6 +5,7 @@
 package kms
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -79,6 +80,10 @@ func (h *Handler) Dispatch(w http.ResponseWriter, r *http.Request) {
 		h.DescribeKey(w, r)
 	case "ListKeys":
 		h.ListKeys(w, r)
+	case "Encrypt":
+		h.Encrypt(w, r)
+	case "Decrypt":
+		h.Decrypt(w, r)
 	case "GetKeyPolicy":
 		h.GetKeyPolicy(w, r)
 	case "GetKeyRotationStatus":
@@ -154,9 +159,21 @@ func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
 		keyMetadata.EncryptionAlgorithms = []string{"SYMMETRIC_DEFAULT"}
 	}
 
+	// Generate the key material the key encrypts with. Symmetric keys never
+	// leave the store, so this is only ever read back by Encrypt/Decrypt.
+	material, err := newKeyMaterial()
+	if err != nil {
+		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
+			"__type":  "InternalFailure",
+			"message": "Failed to generate key material: " + err.Error(),
+		})
+		return
+	}
+
 	// Store key metadata
 	entry := map[string]any{
 		"key_metadata":     keyMetadata,
+		"key_material":     base64.StdEncoding.EncodeToString(material),
 		"created_at":       now,
 		"rotation_enabled": false, // Default to false, can be enabled via EnableKeyRotation
 	}
@@ -592,5 +609,252 @@ func (h *Handler) ScheduleKeyDeletion(w http.ResponseWriter, r *http.Request) {
 		DeletionDate:        float64(deletionDate.Unix()),
 		KeyState:            "PendingDeletion",
 		PendingWindowInDays: pendingWindowInDays,
+	})
+}
+
+// kmsError is a KMS error response, so the crypto helpers can report a failure
+// the caller turns into the right __type without writing the response themselves.
+type kmsError struct {
+	status  int
+	errType string
+	message string
+}
+
+func writeKMSError(w http.ResponseWriter, e *kmsError) {
+	writeKMSJSON(w, e.status, map[string]any{
+		"__type":  e.errType,
+		"message": e.message,
+	})
+}
+
+// normalizeKeyID accepts either a bare key ID or a key ARN and returns the key ID.
+func normalizeKeyID(keyID string) string {
+	if strings.HasPrefix(keyID, "arn:aws:kms:") {
+		parts := strings.Split(keyID, "/")
+		return parts[len(parts)-1]
+	}
+	return keyID
+}
+
+// keyMaterial returns the AES key material for a stored key. Keys created before
+// key material was persisted at creation are backfilled on first use, so an
+// existing store keeps working rather than failing every Encrypt.
+func (h *Handler) keyMaterial(res *resource.Resource, entry map[string]any) ([]byte, *kmsError) {
+	if encoded, ok := entry["key_material"].(string); ok && encoded != "" {
+		material, err := base64.StdEncoding.DecodeString(encoded)
+		if err != nil || len(material) != keyMaterialBytes {
+			return nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
+				"Corrupt key material for key: " + res.ID}
+		}
+		return material, nil
+	}
+
+	material, err := newKeyMaterial()
+	if err != nil {
+		return nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
+			"Failed to generate key material: " + err.Error()}
+	}
+
+	entry["key_material"] = base64.StdEncoding.EncodeToString(material)
+
+	buf, _ := json.Marshal(entry)
+	res.Attributes = buf
+	if err := h.Store.Update(res); err != nil {
+		return nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
+			"Failed to persist key material: " + err.Error()}
+	}
+
+	return material, nil
+}
+
+// loadKeyForCrypto resolves a key ID to its metadata and key material, rejecting
+// keys that are not usable for encrypt/decrypt.
+func (h *Handler) loadKeyForCrypto(keyID, ns string) (*KeyMetadata, []byte, *kmsError) {
+	res, err := h.Store.Get(keyID, "kms", "key", ns)
+	if err != nil {
+		return nil, nil, &kmsError{http.StatusNotFound, "NotFoundException",
+			"Key not found: " + keyID}
+	}
+
+	var entry map[string]any
+	if err := json.Unmarshal(res.Attributes, &entry); err != nil {
+		return nil, nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
+			"Failed to decode key metadata"}
+	}
+
+	keyMetadataBytes, _ := json.Marshal(entry["key_metadata"])
+	var keyMetadata KeyMetadata
+	if err := json.Unmarshal(keyMetadataBytes, &keyMetadata); err != nil {
+		return nil, nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
+			"Failed to decode key metadata"}
+	}
+
+	if keyMetadata.KeyState != "Enabled" {
+		return nil, nil, &kmsError{http.StatusBadRequest, "KMSInvalidStateException",
+			keyMetadata.ARN + " is in state " + keyMetadata.KeyState +
+				", which is not valid for this operation."}
+	}
+
+	if !keyMetadata.Enabled {
+		return nil, nil, &kmsError{http.StatusBadRequest, "DisabledException",
+			keyMetadata.ARN + " is disabled."}
+	}
+
+	if keyMetadata.KeyUsage != "ENCRYPT_DECRYPT" {
+		return nil, nil, &kmsError{http.StatusBadRequest, "InvalidKeyUsageException",
+			keyMetadata.ARN + " has KeyUsage " + keyMetadata.KeyUsage +
+				", which cannot be used for this operation."}
+	}
+
+	material, kerr := h.keyMaterial(res, entry)
+	if kerr != nil {
+		return nil, nil, kerr
+	}
+
+	return &keyMetadata, material, nil
+}
+
+// Encrypt encrypts plaintext under a KMS key
+func (h *Handler) Encrypt(w http.ResponseWriter, r *http.Request) {
+	ns := util.NamespaceFromHeader(r)
+
+	var req EncryptInput
+	if err := util.DecodeAWSJSON(r, &req); err != nil {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidParameterException",
+			"message": "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	if req.KeyID == "" {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidParameterException",
+			"message": "KeyId is required",
+		})
+		return
+	}
+
+	if len(req.Plaintext) == 0 {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "ValidationException",
+			"message": "Plaintext is required and must not be empty",
+		})
+		return
+	}
+
+	if len(req.Plaintext) > maxPlaintextBytes {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "ValidationException",
+			"message": "Plaintext exceeds the maximum length for a symmetric key",
+		})
+		return
+	}
+
+	// Only symmetric encryption is backed by key material here
+	encryptionAlgorithm := req.EncryptionAlgorithm
+	if encryptionAlgorithm == "" {
+		encryptionAlgorithm = "SYMMETRIC_DEFAULT"
+	}
+	if encryptionAlgorithm != "SYMMETRIC_DEFAULT" {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidParameterException",
+			"message": "Unsupported EncryptionAlgorithm: " + encryptionAlgorithm,
+		})
+		return
+	}
+
+	keyMetadata, material, kerr := h.loadKeyForCrypto(normalizeKeyID(req.KeyID), ns)
+	if kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+
+	blob, err := encryptBlob(keyMetadata.KeyID, material, req.Plaintext, req.EncryptionContext)
+	if err != nil {
+		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
+			"__type":  "InternalFailure",
+			"message": "Failed to encrypt: " + err.Error(),
+		})
+		return
+	}
+
+	writeKMSJSON(w, http.StatusOK, EncryptOutput{
+		CiphertextBlob:      blob,
+		KeyID:               keyMetadata.ARN,
+		EncryptionAlgorithm: encryptionAlgorithm,
+	})
+}
+
+// Decrypt decrypts a ciphertext blob produced by Encrypt
+func (h *Handler) Decrypt(w http.ResponseWriter, r *http.Request) {
+	ns := util.NamespaceFromHeader(r)
+
+	var req DecryptInput
+	if err := util.DecodeAWSJSON(r, &req); err != nil {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidParameterException",
+			"message": "Invalid request body: " + err.Error(),
+		})
+		return
+	}
+
+	if len(req.CiphertextBlob) == 0 {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidCiphertextException",
+			"message": "CiphertextBlob is required and must not be empty",
+		})
+		return
+	}
+
+	encryptionAlgorithm := req.EncryptionAlgorithm
+	if encryptionAlgorithm == "" {
+		encryptionAlgorithm = "SYMMETRIC_DEFAULT"
+	}
+	if encryptionAlgorithm != "SYMMETRIC_DEFAULT" {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidParameterException",
+			"message": "Unsupported EncryptionAlgorithm: " + encryptionAlgorithm,
+		})
+		return
+	}
+
+	// The blob names the key it was sealed under, so KeyId is optional
+	keyID, body, err := splitBlob(req.CiphertextBlob)
+	if err != nil {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidCiphertextException",
+			"message": "The ciphertext refers to a key that does not exist or is malformed",
+		})
+		return
+	}
+
+	if req.KeyID != "" && normalizeKeyID(req.KeyID) != keyID {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "IncorrectKeyException",
+			"message": "The key specified does not match the key the ciphertext was encrypted under",
+		})
+		return
+	}
+
+	keyMetadata, material, kerr := h.loadKeyForCrypto(keyID, ns)
+	if kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+
+	plaintext, err := decryptBlob(material, body, req.EncryptionContext)
+	if err != nil {
+		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
+			"__type":  "InvalidCiphertextException",
+			"message": "The ciphertext could not be decrypted with the supplied encryption context",
+		})
+		return
+	}
+
+	writeKMSJSON(w, http.StatusOK, DecryptOutput{
+		KeyID:               keyMetadata.ARN,
+		Plaintext:           plaintext,
+		EncryptionAlgorithm: encryptionAlgorithm,
 	})
 }
