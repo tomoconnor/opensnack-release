@@ -1,0 +1,5 @@
+aws_route.internet {route_table_id}_{destination_cidr_block}
+aws_route.partner {route_table_id}_{destination_cidr_block}
+aws_route_table_association.public[0] {subnet_id}/{route_table_id}
+aws_route_table_association.public[1] {subnet_id}/{route_table_id}
+aws_route_table_association.private {subnet_id}/{route_table_id}

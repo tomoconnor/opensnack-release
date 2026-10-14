@@ -1,0 +1,2 @@
+aws_cloudwatch_log_stream.s {log_group_name}:{name}
+aws_cloudwatch_log_metric_filter.errors {log_group_name}:{name}

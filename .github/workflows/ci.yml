@@ -1,0 +1,66 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  # Every resource in opentofu/cycle/cases must apply, plan clean, update in
+  # place, import and destroy against a real opensnack (see cmd/tfcycle).
+  cycle:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: opensnack
+          POSTGRES_USER: opensnack
+          POSTGRES_PASSWORD: snack
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opensnack"
+          --health-interval 2s
+          --health-retries 30
+    env:
+      OPENSNACK_PG_DSN: postgres://opensnack:snack@localhost:5432/opensnack?sslmode=disable
+      OPENSNACK_OBJECT_ROOT: /tmp/opensnack/objects
+      # *.localtest.me resolves to 127.0.0.1, so the provider can use
+      # real-style host names (sqs.us-east-1.localtest.me, bucket.s3...).
+      OPENSNACK_HOST_SUFFIXES: localtest.me
+      OPENSNACK_INTERNAL_TOKEN: ci
+      TF_PLUGIN_CACHE_DIR: /tmp/tf-plugin-cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: opentofu/setup-opentofu@v1
+        with:
+          tofu_version: 1.10.6
+          tofu_wrapper: false
+      - run: mkdir -p $TF_PLUGIN_CACHE_DIR
+      - name: Start opensnack
+        run: |
+          go build -o /tmp/opensnack ./cmd/opensnack
+          /tmp/opensnack > /tmp/opensnack.log 2>&1 &
+          for i in $(seq 30); do curl -sf localhost:4566/_opensnack/health && exit 0; sleep 1; done
+          cat /tmp/opensnack.log; exit 1
+      - name: Resource cycle
+        run: go run ./cmd/tfcycle -token ci opentofu/cycle/cases/*
+      - if: failure()
+        run: tail -200 /tmp/opensnack.log

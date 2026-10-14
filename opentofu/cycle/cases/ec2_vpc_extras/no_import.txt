@@ -1,0 +1,2 @@
+# The provider has no importer for these.
+aws_main_route_table_association.alt

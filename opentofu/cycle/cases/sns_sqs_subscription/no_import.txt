@@ -1,0 +1,5 @@
+# confirmation_timeout_in_minutes and endpoint_auto_confirms exist only in
+# the provider; AWS never returns them, so an imported subscription always
+# plans to set them (against real AWS too). Every attribute AWS does return
+# imports cleanly.
+aws_sns_topic_subscription.s

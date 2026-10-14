@@ -1,0 +1,3 @@
+# EC2 can't return an imported key's public_key, so the provider always
+# plans a replacement after importing aws_key_pair (importIgnore="public_key").
+aws_key_pair.deployer

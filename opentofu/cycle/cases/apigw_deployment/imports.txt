@@ -1,0 +1,4 @@
+aws_apigatewayv2_integration.i {api_id}/{id}
+aws_apigatewayv2_route.r {api_id}/{id}
+aws_apigatewayv2_deployment.d {api_id}/{id}
+aws_apigatewayv2_stage.s {api_id}/{id}

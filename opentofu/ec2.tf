@@ -2,8 +2,17 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+data "aws_ami" "al2023" {
+  most_recent = true
+  owners      = ["amazon"]
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023*-x86_64"]
+  }
+}
+
 resource "aws_instance" "vm" {
-  ami           = "ami-12345678"
+  ami           = data.aws_ami.al2023.id
   instance_type = "t3.micro"
 }
 
