@@ -142,7 +142,7 @@ func TestCreateKeyPersistsKeyMaterial(t *testing.T) {
 
 	meta := createKey(t, h)
 
-	res, err := store.Get(meta.KeyID, "kms", "key", "default")
+	res, err := store.Get(meta.KeyID, "kms", "key", "default@us-east-1")
 	if err != nil {
 		t.Fatalf("key not stored: %v", err)
 	}
@@ -357,8 +357,9 @@ func TestEncryptUnknownKey(t *testing.T) {
 		KeyID:     "11111111-2222-3333-4444-555555555555",
 		Plaintext: []byte("nope"),
 	})
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d: %s", rec.Code, rec.Body.String())
+	// KMS reports every client error as a 400 with the error in __type
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 	if got := errType(t, rec); got != "NotFoundException" {
 		t.Fatalf("expected NotFoundException, got %s", got)
@@ -375,7 +376,7 @@ func TestEncryptValidation(t *testing.T) {
 	}{
 		"missing key id": {
 			kms.EncryptInput{Plaintext: []byte("x")},
-			"InvalidParameterException",
+			"ValidationException",
 		},
 		"empty plaintext": {
 			kms.EncryptInput{KeyID: meta.KeyID},
@@ -448,7 +449,7 @@ func TestKeyMaterialBackfilledForLegacyKey(t *testing.T) {
 
 	meta := createKey(t, h)
 
-	res, err := store.Get(meta.KeyID, "kms", "key", "default")
+	res, err := store.Get(meta.KeyID, "kms", "key", "default@us-east-1")
 	if err != nil {
 		t.Fatalf("key not stored: %v", err)
 	}
@@ -487,7 +488,7 @@ func TestKeyMaterialBackfilledForLegacyKey(t *testing.T) {
 func TestDispatchUnknownAction(t *testing.T) {
 	h := kms.NewHandler(NewMockStore())
 
-	rec := call(t, h, "GenerateDataKey", map[string]any{})
+	rec := call(t, h, "NoSuchOperation", map[string]any{})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
 	}

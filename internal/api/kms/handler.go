@@ -5,23 +5,19 @@
 package kms
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
 	"opensnack/internal/awsresponses"
 	"opensnack/internal/resource"
 	"opensnack/internal/util"
-
-	"github.com/google/uuid"
 )
 
 const (
 	APIVersion = "2014-11-01"
-	kmsRegion  = "us-east-1"
-	kmsAccount = "000000000000"
 )
 
 type Handler struct {
@@ -30,11 +26,6 @@ type Handler struct {
 
 func NewHandler(store resource.Store) *Handler {
 	return &Handler{Store: store}
-}
-
-// Build KMS Key ARN
-func keyArn(keyID string) string {
-	return "arn:aws:kms:" + kmsRegion + ":" + kmsAccount + ":key/" + keyID
 }
 
 // writeKMSJSON writes JSON response with KMS-specific Content-Type
@@ -49,6 +40,22 @@ func writeKMSJSON(w http.ResponseWriter, status int, v interface{}) error {
 	w.WriteHeader(status)
 
 	return json.NewEncoder(w).Encode(v)
+}
+
+func writeKMSError(w http.ResponseWriter, e *Error) {
+	writeKMSJSON(w, e.Status, map[string]any{
+		"__type":  e.Type,
+		"message": e.Message,
+	})
+}
+
+// decode reads the request body, writing the error itself when it fails.
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	if err := util.DecodeAWSJSON(r, v); err != nil {
+		writeKMSError(w, &Error{http.StatusBadRequest, "SerializationException", "Invalid request body: " + err.Error()})
+		return false
+	}
+	return true
 }
 
 // Dispatch handles KMS JSON API requests
@@ -80,18 +87,50 @@ func (h *Handler) Dispatch(w http.ResponseWriter, r *http.Request) {
 		h.DescribeKey(w, r)
 	case "ListKeys":
 		h.ListKeys(w, r)
+	case "UpdateKeyDescription":
+		h.UpdateKeyDescription(w, r)
+	case "EnableKey":
+		h.setEnabled(w, r, true)
+	case "DisableKey":
+		h.setEnabled(w, r, false)
+	case "ScheduleKeyDeletion":
+		h.ScheduleKeyDeletion(w, r)
+	case "CancelKeyDeletion":
+		h.CancelKeyDeletion(w, r)
+	case "GetKeyPolicy":
+		h.GetKeyPolicy(w, r)
+	case "PutKeyPolicy":
+		h.PutKeyPolicy(w, r)
+	case "ListKeyPolicies":
+		h.ListKeyPolicies(w, r)
+	case "EnableKeyRotation":
+		h.EnableKeyRotation(w, r)
+	case "DisableKeyRotation":
+		h.DisableKeyRotation(w, r)
+	case "GetKeyRotationStatus":
+		h.GetKeyRotationStatus(w, r)
+	case "TagResource":
+		h.TagResource(w, r)
+	case "UntagResource":
+		h.UntagResource(w, r)
+	case "ListResourceTags":
+		h.ListResourceTags(w, r)
+	case "CreateAlias":
+		h.CreateAlias(w, r)
+	case "UpdateAlias":
+		h.UpdateAlias(w, r)
+	case "DeleteAlias":
+		h.DeleteAlias(w, r)
+	case "ListAliases":
+		h.ListAliases(w, r)
 	case "Encrypt":
 		h.Encrypt(w, r)
 	case "Decrypt":
 		h.Decrypt(w, r)
-	case "GetKeyPolicy":
-		h.GetKeyPolicy(w, r)
-	case "GetKeyRotationStatus":
-		h.GetKeyRotationStatus(w, r)
-	case "ListResourceTags":
-		h.ListResourceTags(w, r)
-	case "ScheduleKeyDeletion":
-		h.ScheduleKeyDeletion(w, r)
+	case "GenerateDataKey":
+		h.GenerateDataKey(w, r, true)
+	case "GenerateDataKeyWithoutPlaintext":
+		h.GenerateDataKey(w, r, false)
 	default:
 		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
 			"__type":  "InvalidAction",
@@ -102,759 +141,534 @@ func (h *Handler) Dispatch(w http.ResponseWriter, r *http.Request) {
 
 // CreateKey creates a new KMS key
 func (h *Handler) CreateKey(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
 	var req CreateKeyInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+	if !decode(w, r, &req) {
 		return
 	}
 
-	// Set defaults
-	customerMasterKeySpec := req.CustomerMasterKeySpec
-	if customerMasterKeySpec == "" {
-		customerMasterKeySpec = "SYMMETRIC_DEFAULT"
+	spec := req.KeySpec
+	if spec == "" {
+		spec = req.CustomerMasterKeySpec
 	}
-
-	keyUsage := req.KeyUsage
-	if keyUsage == "" {
-		keyUsage = "ENCRYPT_DECRYPT"
+	if spec == "" {
+		spec = "SYMMETRIC_DEFAULT"
 	}
-
-	multiRegion := false
-	if req.MultiRegion != nil {
-		multiRegion = *req.MultiRegion
+	usage := req.KeyUsage
+	if usage == "" {
+		usage = "ENCRYPT_DECRYPT"
+		if strings.HasPrefix(spec, "HMAC_") {
+			usage = "GENERATE_VERIFY_MAC"
+		}
 	}
-
-	// Generate key ID (UUID format - AWS KMS uses UUID format)
-	keyIDFormatted := uuid.New().String()
-
-	now := time.Now().UTC()
-	creationDate := float64(now.Unix())
-
-	arn := keyArn(keyIDFormatted)
-
-	// Build key metadata
-	keyMetadata := KeyMetadata{
-		AWSAccountID:          kmsAccount,
-		ARN:                   arn,
-		CreationDate:          creationDate,
-		CustomerMasterKeySpec: customerMasterKeySpec,
-		Description:           req.Description,
-		Enabled:               true,
-		KeyID:                 keyIDFormatted,
-		KeyManager:            "CUSTOMER",
-		KeySpec:               customerMasterKeySpec,
-		KeyState:              "Enabled",
-		KeyUsage:              keyUsage,
-		MultiRegion:           multiRegion,
-		Origin:                "AWS_KMS",
+	origin := req.Origin
+	if origin == "" {
+		origin = "AWS_KMS"
 	}
-
-	// Set encryption algorithms for symmetric keys
-	if customerMasterKeySpec == "SYMMETRIC_DEFAULT" {
-		keyMetadata.EncryptionAlgorithms = []string{"SYMMETRIC_DEFAULT"}
+	if req.Policy != "" && !json.Valid([]byte(req.Policy)) {
+		writeKMSError(w, &Error{http.StatusBadRequest, "MalformedPolicyDocumentException", "The policy is not valid JSON."})
+		return
 	}
-
-	// Generate the key material the key encrypts with. Symmetric keys never
-	// leave the store, so this is only ever read back by Encrypt/Decrypt.
-	material, err := newKeyMaterial()
-	if err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to generate key material: " + err.Error(),
-		})
+	if kerr := validateTags(req.Tags); kerr != nil {
+		writeKMSError(w, kerr)
 		return
 	}
 
-	// Store key metadata
-	entry := map[string]any{
-		"key_metadata":     keyMetadata,
-		"key_material":     base64.StdEncoding.EncodeToString(material),
-		"created_at":       now,
-		"rotation_enabled": false, // Default to false, can be enabled via EnableKeyRotation
-	}
-
-	if req.Policy != "" {
-		entry["policy"] = req.Policy
-	}
-
-	if len(req.Tags) > 0 {
-		entry["tags"] = req.Tags
-	}
-
-	buf, _ := json.Marshal(entry)
-	res := &resource.Resource{
-		ID:         keyIDFormatted,
-		Namespace:  ns,
-		Service:    "kms",
-		Type:       "key",
-		Attributes: buf,
-	}
-
-	if err := h.Store.Create(res); err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to create key: " + err.Error(),
-		})
-		return
-	}
-
-	writeKMSJSON(w, http.StatusOK, CreateKeyOutput{
-		KeyMetadata: keyMetadata,
+	_, rec, kerr := h.newKey(r, keyOptions{
+		description: req.Description,
+		spec:        spec,
+		usage:       usage,
+		origin:      origin,
+		manager:     "CUSTOMER",
+		policy:      req.Policy,
+		multiRegion: req.MultiRegion != nil && *req.MultiRegion,
+		tags:        req.Tags,
 	})
+	if kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+
+	writeKMSJSON(w, http.StatusOK, CreateKeyOutput{KeyMetadata: rec.Metadata})
 }
 
 // DescribeKey describes an existing KMS key
 func (h *Handler) DescribeKey(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
 	var req DescribeKeyInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+	if !decode(w, r, &req) {
 		return
 	}
-
-	if req.KeyID == "" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "KeyId is required",
-		})
+	_, rec, kerr := h.resolveKey(r, req.KeyID, true)
+	if kerr != nil {
+		writeKMSError(w, kerr)
 		return
 	}
-
-	// Extract key ID from ARN if provided
-	keyID := req.KeyID
-	if strings.HasPrefix(keyID, "arn:aws:kms:") {
-		parts := strings.Split(keyID, "/")
-		if len(parts) > 0 {
-			keyID = parts[len(parts)-1]
-		}
-	}
-
-	// Get key from store
-	res, err := h.Store.Get(keyID, "kms", "key", ns)
-	if err != nil {
-		writeKMSJSON(w, http.StatusNotFound, map[string]any{
-			"__type":  "NotFoundException",
-			"message": "Key not found: " + keyID,
-		})
-		return
-	}
-
-	var entry map[string]any
-	if err := json.Unmarshal(res.Attributes, &entry); err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to decode key metadata",
-		})
-		return
-	}
-
-	keyMetadataBytes, _ := json.Marshal(entry["key_metadata"])
-	var keyMetadata KeyMetadata
-	json.Unmarshal(keyMetadataBytes, &keyMetadata)
-
-	writeKMSJSON(w, http.StatusOK, DescribeKeyOutput{
-		KeyMetadata: keyMetadata,
-	})
+	writeKMSJSON(w, http.StatusOK, DescribeKeyOutput{KeyMetadata: rec.Metadata})
 }
 
 // ListKeys lists all KMS keys
 func (h *Handler) ListKeys(w http.ResponseWriter, r *http.Request) {
+	var req ListKeysInput
+	if !decode(w, r, &req) {
+		return
+	}
 	ns := util.NamespaceFromHeader(r)
 
 	keys, err := h.Store.List("kms", "key", ns)
 	if err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to list keys: " + err.Error(),
-		})
+		writeKMSError(w, errInternal("Failed to list keys: "+err.Error()))
 		return
 	}
-
-	keyList := make([]KeyMetadata, 0, len(keys))
-	for _, keyRes := range keys {
-		var entry map[string]any
-		if err := json.Unmarshal(keyRes.Attributes, &entry); err != nil {
+	entries := make([]KeyListEntry, 0, len(keys))
+	for _, k := range keys {
+		var rec keyRecord
+		if json.Unmarshal(k.Attributes, &rec) != nil {
 			continue
 		}
-
-		keyMetadataBytes, _ := json.Marshal(entry["key_metadata"])
-		var keyMetadata KeyMetadata
-		if err := json.Unmarshal(keyMetadataBytes, &keyMetadata); err != nil {
-			continue
-		}
-
-		keyList = append(keyList, keyMetadata)
+		entries = append(entries, KeyListEntry{KeyID: rec.Metadata.KeyID, KeyArn: rec.Metadata.ARN})
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].KeyID < entries[j].KeyID })
 
-	writeKMSJSON(w, http.StatusOK, map[string]any{
-		"Keys":      keyList,
-		"Truncated": false,
-	})
+	start, end, next, perr := paginate(len(entries), req.Limit, req.Marker, 1000)
+	if perr != nil {
+		writeKMSError(w, &Error{http.StatusBadRequest, "InvalidMarkerException", "Invalid marker"})
+		return
+	}
+	writeKMSJSON(w, http.StatusOK, ListKeysOutput{Keys: entries[start:end], NextMarker: next, Truncated: next != ""})
 }
 
-// GetKeyPolicy retrieves the key policy for a KMS key
-func (h *Handler) GetKeyPolicy(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
-	var req GetKeyPolicyInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+// UpdateKeyDescription replaces a key's description
+func (h *Handler) UpdateKeyDescription(w http.ResponseWriter, r *http.Request) {
+	var req UpdateKeyDescriptionInput
+	if !decode(w, r, &req) {
 		return
 	}
-
-	if req.KeyID == "" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "KeyId is required",
-		})
-		return
-	}
-
-	// Extract key ID from ARN if provided
-	keyID := req.KeyID
-	if strings.HasPrefix(keyID, "arn:aws:kms:") {
-		parts := strings.Split(keyID, "/")
-		if len(parts) > 0 {
-			keyID = parts[len(parts)-1]
-		}
-	}
-
-	// Get key from store
-	res, err := h.Store.Get(keyID, "kms", "key", ns)
-	if err != nil {
-		writeKMSJSON(w, http.StatusNotFound, map[string]any{
-			"__type":  "NotFoundException",
-			"message": "Key not found: " + keyID,
-		})
-		return
-	}
-
-	var entry map[string]any
-	if err := json.Unmarshal(res.Attributes, &entry); err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to decode key metadata",
-		})
-		return
-	}
-
-	// Get policy, default to empty policy if not set
-	policy := ""
-	if p, ok := entry["policy"].(string); ok {
-		policy = p
-	}
-
-	// If no policy is set, return default policy
-	if policy == "" {
-		policy = `{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "Enable IAM User Permissions",
-      "Effect": "Allow",
-      "Principal": {
-        "AWS": "arn:aws:iam::000000000000:root"
-      },
-      "Action": "kms:*",
-      "Resource": "*"
-    }
-  ]
-}`
-	}
-
-	writeKMSJSON(w, http.StatusOK, GetKeyPolicyOutput{
-		Policy: policy,
-	})
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		rec.Metadata.Description = req.Description
+		return nil
+	}, struct{}{})
 }
 
-// GetKeyRotationStatus retrieves the key rotation status for a KMS key
-func (h *Handler) GetKeyRotationStatus(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
-	var req GetKeyRotationStatusInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+// setEnabled implements EnableKey and DisableKey
+func (h *Handler) setEnabled(w http.ResponseWriter, r *http.Request, enabled bool) {
+	var req KeyIDInput
+	if !decode(w, r, &req) {
 		return
 	}
-
-	if req.KeyID == "" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "KeyId is required",
-		})
-		return
-	}
-
-	// Extract key ID from ARN if provided
-	keyID := req.KeyID
-	if strings.HasPrefix(keyID, "arn:aws:kms:") {
-		parts := strings.Split(keyID, "/")
-		if len(parts) > 0 {
-			keyID = parts[len(parts)-1]
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		rec.Metadata.Enabled = enabled
+		rec.Metadata.KeyState = "Disabled"
+		if enabled {
+			rec.Metadata.KeyState = "Enabled"
 		}
-	}
-
-	// Get key from store
-	res, err := h.Store.Get(keyID, "kms", "key", ns)
-	if err != nil {
-		writeKMSJSON(w, http.StatusNotFound, map[string]any{
-			"__type":  "NotFoundException",
-			"message": "Key not found: " + keyID,
-		})
-		return
-	}
-
-	var entry map[string]any
-	if err := json.Unmarshal(res.Attributes, &entry); err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to decode key metadata",
-		})
-		return
-	}
-
-	// Get rotation status, default to false if not set
-	rotationEnabled := false
-	if re, ok := entry["rotation_enabled"].(bool); ok {
-		rotationEnabled = re
-	}
-
-	writeKMSJSON(w, http.StatusOK, GetKeyRotationStatusOutput{
-		KeyRotationEnabled: rotationEnabled,
-		KeyID:              keyID,
-	})
+		return nil
+	}, struct{}{})
 }
 
-// ListResourceTags lists tags for a KMS key
-func (h *Handler) ListResourceTags(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
-	var req ListResourceTagsInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+// mutate loads a customer managed key by key ID or ARN, applies fn, saves the
+// key and writes out. Keys pending deletion and AWS managed keys are refused.
+func (h *Handler) mutate(w http.ResponseWriter, r *http.Request, ref string, fn func(*keyRecord) *Error, out any) {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	res, rec, kerr := h.resolveKey(r, ref, false)
+	if kerr == nil {
+		kerr = mutable(&rec.Metadata)
+	}
+	if kerr == nil {
+		kerr = fn(rec)
+	}
+	if kerr == nil {
+		kerr = h.saveKey(res, rec)
+	}
+	if kerr != nil {
+		writeKMSError(w, kerr)
 		return
 	}
-
-	if req.KeyID == "" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "KeyId is required",
-		})
-		return
-	}
-
-	// Extract key ID from ARN if provided
-	keyID := req.KeyID
-	if strings.HasPrefix(keyID, "arn:aws:kms:") {
-		parts := strings.Split(keyID, "/")
-		if len(parts) > 0 {
-			keyID = parts[len(parts)-1]
-		}
-	}
-
-	// Get key from store
-	res, err := h.Store.Get(keyID, "kms", "key", ns)
-	if err != nil {
-		writeKMSJSON(w, http.StatusNotFound, map[string]any{
-			"__type":  "NotFoundException",
-			"message": "Key not found: " + keyID,
-		})
-		return
-	}
-
-	var entry map[string]any
-	if err := json.Unmarshal(res.Attributes, &entry); err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to decode key metadata",
-		})
-		return
-	}
-
-	// Extract tags from entry
-	var tags []Tag
-	if tagsData, ok := entry["tags"]; ok {
-		if tagsSlice, ok := tagsData.([]Tag); ok {
-			// Tags stored as []Tag
-			tags = tagsSlice
-		} else if tagsSlice, ok := tagsData.([]interface{}); ok {
-			// Handle case where tags are stored as []interface{}
-			tags = make([]Tag, 0, len(tagsSlice))
-			for _, t := range tagsSlice {
-				if tagMap, ok := t.(map[string]interface{}); ok {
-					tag := Tag{}
-					if key, ok := tagMap["TagKey"].(string); ok {
-						tag.TagKey = key
-					}
-					if value, ok := tagMap["TagValue"].(string); ok {
-						tag.TagValue = value
-					}
-					tags = append(tags, tag)
-				}
-			}
-		}
-	}
-
-	// If no tags, return empty list
-	if tags == nil {
-		tags = []Tag{}
-	}
-
-	writeKMSJSON(w, http.StatusOK, ListResourceTagsOutput{
-		Tags:      tags,
-		Truncated: false,
-	})
+	writeKMSJSON(w, http.StatusOK, out)
 }
 
 // ScheduleKeyDeletion schedules deletion of a KMS key
 func (h *Handler) ScheduleKeyDeletion(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
 	var req ScheduleKeyDeletionInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+	if !decode(w, r, &req) {
 		return
 	}
-
-	if req.KeyID == "" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "KeyId is required",
-		})
+	window := req.PendingWindowInDays
+	if window == 0 {
+		window = 30
+	}
+	if window < 7 || window > 30 {
+		writeKMSError(w, errValidation("PendingWindowInDays must be between 7 and 30"))
 		return
 	}
-
-	// Extract key ID from ARN if provided
-	keyID := req.KeyID
-	if strings.HasPrefix(keyID, "arn:aws:kms:") {
-		parts := strings.Split(keyID, "/")
-		if len(parts) > 0 {
-			keyID = parts[len(parts)-1]
+	var out ScheduleKeyDeletionOutput
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		deletion := float64(time.Now().UTC().AddDate(0, 0, int(window)).Unix())
+		rec.Metadata.KeyState = "PendingDeletion"
+		rec.Metadata.Enabled = false
+		rec.Metadata.DeletionDate = deletion
+		rec.Metadata.PendingDeletionWindowInDays = window
+		out = ScheduleKeyDeletionOutput{
+			KeyID:               rec.Metadata.ARN,
+			DeletionDate:        deletion,
+			KeyState:            "PendingDeletion",
+			PendingWindowInDays: window,
 		}
-	}
+		return nil
+	}, &out)
+}
 
-	// Get key from store
-	res, err := h.Store.Get(keyID, "kms", "key", ns)
-	if err != nil {
-		writeKMSJSON(w, http.StatusNotFound, map[string]any{
-			"__type":  "NotFoundException",
-			"message": "Key not found: " + keyID,
-		})
+// CancelKeyDeletion takes a key out of PendingDeletion. Like AWS, the key
+// comes back disabled.
+func (h *Handler) CancelKeyDeletion(w http.ResponseWriter, r *http.Request) {
+	var req KeyIDInput
+	if !decode(w, r, &req) {
 		return
 	}
-
-	// Set default pending window in days if not provided
-	pendingWindowInDays := req.PendingWindowInDays
-	if pendingWindowInDays == 0 {
-		pendingWindowInDays = 30 // AWS default
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	res, rec, kerr := h.resolveKey(r, req.KeyID, false)
+	if kerr == nil && rec.Metadata.KeyState != "PendingDeletion" {
+		kerr = errInvalidState(rec.Metadata.ARN + " is " + stateText(rec.Metadata.KeyState) + ".")
 	}
-
-	// Calculate deletion date
-	now := time.Now().UTC()
-	deletionDate := now.AddDate(0, 0, int(pendingWindowInDays))
-
-	// Update key entry with deletion date
-	var entry map[string]any
-	if err := json.Unmarshal(res.Attributes, &entry); err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to decode key metadata",
-		})
-		return
+	if kerr == nil {
+		rec.Metadata.KeyState = "Disabled"
+		rec.Metadata.Enabled = false
+		rec.Metadata.DeletionDate = 0
+		rec.Metadata.PendingDeletionWindowInDays = 0
+		kerr = h.saveKey(res, rec)
 	}
-
-	entry["deletion_date"] = float64(deletionDate.Unix())
-	entry["pending_window_in_days"] = pendingWindowInDays
-
-	// Update key metadata state to PendingDeletion
-	keyMetadataBytes, _ := json.Marshal(entry["key_metadata"])
-	var keyMetadata KeyMetadata
-	json.Unmarshal(keyMetadataBytes, &keyMetadata)
-	keyMetadata.KeyState = "PendingDeletion"
-	entry["key_metadata"] = keyMetadata
-
-	buf, _ := json.Marshal(entry)
-	res.Attributes = buf
-	if err := h.Store.Update(res); err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to schedule key deletion: " + err.Error(),
-		})
-		return
-	}
-
-	writeKMSJSON(w, http.StatusOK, ScheduleKeyDeletionOutput{
-		KeyID:               keyID,
-		DeletionDate:        float64(deletionDate.Unix()),
-		KeyState:            "PendingDeletion",
-		PendingWindowInDays: pendingWindowInDays,
-	})
-}
-
-// kmsError is a KMS error response, so the crypto helpers can report a failure
-// the caller turns into the right __type without writing the response themselves.
-type kmsError struct {
-	status  int
-	errType string
-	message string
-}
-
-func writeKMSError(w http.ResponseWriter, e *kmsError) {
-	writeKMSJSON(w, e.status, map[string]any{
-		"__type":  e.errType,
-		"message": e.message,
-	})
-}
-
-// normalizeKeyID accepts either a bare key ID or a key ARN and returns the key ID.
-func normalizeKeyID(keyID string) string {
-	if strings.HasPrefix(keyID, "arn:aws:kms:") {
-		parts := strings.Split(keyID, "/")
-		return parts[len(parts)-1]
-	}
-	return keyID
-}
-
-// keyMaterial returns the AES key material for a stored key. Keys created before
-// key material was persisted at creation are backfilled on first use, so an
-// existing store keeps working rather than failing every Encrypt.
-func (h *Handler) keyMaterial(res *resource.Resource, entry map[string]any) ([]byte, *kmsError) {
-	if encoded, ok := entry["key_material"].(string); ok && encoded != "" {
-		material, err := base64.StdEncoding.DecodeString(encoded)
-		if err != nil || len(material) != keyMaterialBytes {
-			return nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
-				"Corrupt key material for key: " + res.ID}
-		}
-		return material, nil
-	}
-
-	material, err := newKeyMaterial()
-	if err != nil {
-		return nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
-			"Failed to generate key material: " + err.Error()}
-	}
-
-	entry["key_material"] = base64.StdEncoding.EncodeToString(material)
-
-	buf, _ := json.Marshal(entry)
-	res.Attributes = buf
-	if err := h.Store.Update(res); err != nil {
-		return nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
-			"Failed to persist key material: " + err.Error()}
-	}
-
-	return material, nil
-}
-
-// loadKeyForCrypto resolves a key ID to its metadata and key material, rejecting
-// keys that are not usable for encrypt/decrypt.
-func (h *Handler) loadKeyForCrypto(keyID, ns string) (*KeyMetadata, []byte, *kmsError) {
-	res, err := h.Store.Get(keyID, "kms", "key", ns)
-	if err != nil {
-		return nil, nil, &kmsError{http.StatusNotFound, "NotFoundException",
-			"Key not found: " + keyID}
-	}
-
-	var entry map[string]any
-	if err := json.Unmarshal(res.Attributes, &entry); err != nil {
-		return nil, nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
-			"Failed to decode key metadata"}
-	}
-
-	keyMetadataBytes, _ := json.Marshal(entry["key_metadata"])
-	var keyMetadata KeyMetadata
-	if err := json.Unmarshal(keyMetadataBytes, &keyMetadata); err != nil {
-		return nil, nil, &kmsError{http.StatusInternalServerError, "InternalFailure",
-			"Failed to decode key metadata"}
-	}
-
-	if keyMetadata.KeyState != "Enabled" {
-		return nil, nil, &kmsError{http.StatusBadRequest, "KMSInvalidStateException",
-			keyMetadata.ARN + " is in state " + keyMetadata.KeyState +
-				", which is not valid for this operation."}
-	}
-
-	if !keyMetadata.Enabled {
-		return nil, nil, &kmsError{http.StatusBadRequest, "DisabledException",
-			keyMetadata.ARN + " is disabled."}
-	}
-
-	if keyMetadata.KeyUsage != "ENCRYPT_DECRYPT" {
-		return nil, nil, &kmsError{http.StatusBadRequest, "InvalidKeyUsageException",
-			keyMetadata.ARN + " has KeyUsage " + keyMetadata.KeyUsage +
-				", which cannot be used for this operation."}
-	}
-
-	material, kerr := h.keyMaterial(res, entry)
 	if kerr != nil {
-		return nil, nil, kerr
+		writeKMSError(w, kerr)
+		return
 	}
+	writeKMSJSON(w, http.StatusOK, CancelKeyDeletionOutput{KeyID: rec.Metadata.ARN})
+}
 
-	return &keyMetadata, material, nil
+func checkPolicyName(name string) *Error {
+	if name != "" && name != "default" {
+		return errNotFound("No such policy exists: " + name)
+	}
+	return nil
+}
+
+// GetKeyPolicy returns the key policy exactly as it was stored
+func (h *Handler) GetKeyPolicy(w http.ResponseWriter, r *http.Request) {
+	var req GetKeyPolicyInput
+	if !decode(w, r, &req) {
+		return
+	}
+	_, rec, kerr := h.resolveKey(r, req.KeyID, false)
+	if kerr == nil {
+		kerr = checkPolicyName(req.PolicyName)
+	}
+	if kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+	policy := rec.Policy
+	if policy == "" {
+		policy = defaultKeyPolicy(rec.Metadata.AWSAccountID)
+	}
+	writeKMSJSON(w, http.StatusOK, GetKeyPolicyOutput{Policy: policy, PolicyName: "default"})
+}
+
+// PutKeyPolicy replaces the key policy
+func (h *Handler) PutKeyPolicy(w http.ResponseWriter, r *http.Request) {
+	var req PutKeyPolicyInput
+	if !decode(w, r, &req) {
+		return
+	}
+	if kerr := checkPolicyName(req.PolicyName); kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+	if req.Policy == "" || !json.Valid([]byte(req.Policy)) {
+		writeKMSError(w, &Error{http.StatusBadRequest, "MalformedPolicyDocumentException", "The policy is not valid JSON."})
+		return
+	}
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		rec.Policy = req.Policy
+		return nil
+	}, struct{}{})
+}
+
+func (h *Handler) ListKeyPolicies(w http.ResponseWriter, r *http.Request) {
+	var req KeyIDInput
+	if !decode(w, r, &req) {
+		return
+	}
+	if _, _, kerr := h.resolveKey(r, req.KeyID, false); kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+	writeKMSJSON(w, http.StatusOK, ListKeyPoliciesOutput{PolicyNames: []string{"default"}})
+}
+
+func rotationSupported(md *KeyMetadata) *Error {
+	if md.KeySpec != "SYMMETRIC_DEFAULT" || md.Origin != "AWS_KMS" {
+		return &Error{http.StatusBadRequest, "UnsupportedOperationException",
+			md.ARN + " key rotation is only supported for symmetric encryption keys with key material generated by KMS."}
+	}
+	if md.KeyState == "Disabled" {
+		return &Error{http.StatusBadRequest, "DisabledException", md.ARN + " is disabled."}
+	}
+	return nil
+}
+
+// EnableKeyRotation turns on automatic rotation, every RotationPeriodInDays
+// (365 by default).
+func (h *Handler) EnableKeyRotation(w http.ResponseWriter, r *http.Request) {
+	var req EnableKeyRotationInput
+	if !decode(w, r, &req) {
+		return
+	}
+	period := int32(365)
+	if req.RotationPeriodInDays != nil {
+		period = *req.RotationPeriodInDays
+	}
+	if period < 90 || period > 2560 {
+		writeKMSError(w, errValidation("RotationPeriodInDays must be between 90 and 2560"))
+		return
+	}
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		if kerr := rotationSupported(&rec.Metadata); kerr != nil {
+			return kerr
+		}
+		rec.RotationEnabled = true
+		rec.RotationPeriodInDays = period
+		rec.NextRotationDate = float64(time.Now().UTC().AddDate(0, 0, int(period)).Unix())
+		return nil
+	}, struct{}{})
+}
+
+func (h *Handler) DisableKeyRotation(w http.ResponseWriter, r *http.Request) {
+	var req KeyIDInput
+	if !decode(w, r, &req) {
+		return
+	}
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		if kerr := rotationSupported(&rec.Metadata); kerr != nil {
+			return kerr
+		}
+		rec.RotationEnabled = false
+		rec.RotationPeriodInDays = 0
+		rec.NextRotationDate = 0
+		return nil
+	}, struct{}{})
+}
+
+// GetKeyRotationStatus reports rotation. The period and next rotation date
+// are only present while rotation is enabled.
+func (h *Handler) GetKeyRotationStatus(w http.ResponseWriter, r *http.Request) {
+	var req GetKeyRotationStatusInput
+	if !decode(w, r, &req) {
+		return
+	}
+	_, rec, kerr := h.resolveKey(r, req.KeyID, false)
+	if kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+	out := GetKeyRotationStatusOutput{KeyRotationEnabled: rec.RotationEnabled, KeyID: rec.Metadata.ARN}
+	if rec.RotationEnabled {
+		period := rec.RotationPeriodInDays
+		if period == 0 {
+			period = 365
+		}
+		out.RotationPeriodInDays = &period
+		out.NextRotationDate = rec.NextRotationDate
+	}
+	writeKMSJSON(w, http.StatusOK, out)
+}
+
+func validateTags(tags []Tag) *Error {
+	for _, t := range tags {
+		if t.TagKey == "" || len(t.TagKey) > 128 || len(t.TagValue) > 256 {
+			return &Error{http.StatusBadRequest, "TagException", "Invalid tag: " + t.TagKey}
+		}
+	}
+	return nil
+}
+
+// TagResource adds or overwrites tags on a key
+func (h *Handler) TagResource(w http.ResponseWriter, r *http.Request) {
+	var req TagResourceInput
+	if !decode(w, r, &req) {
+		return
+	}
+	if kerr := validateTags(req.Tags); kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		for _, t := range req.Tags {
+			found := false
+			for i := range rec.Tags {
+				if rec.Tags[i].TagKey == t.TagKey {
+					rec.Tags[i].TagValue = t.TagValue
+					found = true
+				}
+			}
+			if !found {
+				rec.Tags = append(rec.Tags, t)
+			}
+		}
+		return nil
+	}, struct{}{})
+}
+
+// UntagResource removes tags from a key by key
+func (h *Handler) UntagResource(w http.ResponseWriter, r *http.Request) {
+	var req UntagResourceInput
+	if !decode(w, r, &req) {
+		return
+	}
+	h.mutate(w, r, req.KeyID, func(rec *keyRecord) *Error {
+		drop := map[string]bool{}
+		for _, k := range req.TagKeys {
+			drop[k] = true
+		}
+		kept := rec.Tags[:0]
+		for _, t := range rec.Tags {
+			if !drop[t.TagKey] {
+				kept = append(kept, t)
+			}
+		}
+		rec.Tags = kept
+		return nil
+	}, struct{}{})
+}
+
+// ListResourceTags lists tags for a KMS key
+func (h *Handler) ListResourceTags(w http.ResponseWriter, r *http.Request) {
+	var req ListResourceTagsInput
+	if !decode(w, r, &req) {
+		return
+	}
+	_, rec, kerr := h.resolveKey(r, req.KeyID, false)
+	if kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+	tags := sortedTags(rec.Tags)
+	start, end, next, err := paginate(len(tags), req.Limit, req.Marker, 50)
+	if err != nil {
+		writeKMSError(w, &Error{http.StatusBadRequest, "InvalidMarkerException", "Invalid marker"})
+		return
+	}
+	writeKMSJSON(w, http.StatusOK, ListResourceTagsOutput{
+		Tags:       append([]Tag{}, tags[start:end]...),
+		Truncated:  next != "",
+		NextMarker: next,
+	})
+}
+
+// GenerateDataKey returns a fresh data key, in plaintext and sealed under the
+// KMS key in the same blob format Encrypt produces, so Decrypt opens it.
+func (h *Handler) GenerateDataKey(w http.ResponseWriter, r *http.Request, withPlaintext bool) {
+	var req GenerateDataKeyInput
+	if !decode(w, r, &req) {
+		return
+	}
+	n, kerr := dataKeySize(req.KeySpec, req.NumberOfBytes)
+	if kerr != nil {
+		writeKMSError(w, kerr)
+		return
+	}
+	plaintext, blob, arn, err := h.GenerateDataKeyFor(r, req.KeyID, n, req.EncryptionContext)
+	if err != nil {
+		writeKMSError(w, asError(err))
+		return
+	}
+	out := GenerateDataKeyOutput{CiphertextBlob: blob, KeyID: arn}
+	if withPlaintext {
+		out.Plaintext = plaintext
+	}
+	writeKMSJSON(w, http.StatusOK, out)
+}
+
+func dataKeySize(spec string, numberOfBytes *int32) (int, *Error) {
+	switch {
+	case spec != "" && numberOfBytes != nil:
+		return 0, errValidation("Please specify either number of bytes or key spec.")
+	case spec == "AES_256":
+		return 32, nil
+	case spec == "AES_128":
+		return 16, nil
+	case spec != "":
+		return 0, errValidation("1 validation error detected: Value '" + spec + "' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [AES_256, AES_128]")
+	case numberOfBytes == nil:
+		return 0, errValidation("Please specify either number of bytes or key spec.")
+	case *numberOfBytes < 1 || *numberOfBytes > 1024:
+		return 0, errValidation("NumberOfBytes must be between 1 and 1024")
+	}
+	return int(*numberOfBytes), nil
 }
 
 // Encrypt encrypts plaintext under a KMS key
 func (h *Handler) Encrypt(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
 	var req EncryptInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+	if !decode(w, r, &req) {
 		return
 	}
-
 	if req.KeyID == "" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "KeyId is required",
-		})
+		writeKMSError(w, errValidation("KeyId is required"))
 		return
 	}
-
 	if len(req.Plaintext) == 0 {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "ValidationException",
-			"message": "Plaintext is required and must not be empty",
-		})
+		writeKMSError(w, errValidation("Plaintext is required and must not be empty"))
 		return
 	}
-
 	if len(req.Plaintext) > maxPlaintextBytes {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "ValidationException",
-			"message": "Plaintext exceeds the maximum length for a symmetric key",
-		})
+		writeKMSError(w, errValidation("Plaintext exceeds the maximum length for a symmetric key"))
 		return
 	}
-
 	// Only symmetric encryption is backed by key material here
-	encryptionAlgorithm := req.EncryptionAlgorithm
-	if encryptionAlgorithm == "" {
-		encryptionAlgorithm = "SYMMETRIC_DEFAULT"
-	}
-	if encryptionAlgorithm != "SYMMETRIC_DEFAULT" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Unsupported EncryptionAlgorithm: " + encryptionAlgorithm,
-		})
+	if req.EncryptionAlgorithm != "" && req.EncryptionAlgorithm != "SYMMETRIC_DEFAULT" {
+		writeKMSError(w, &Error{http.StatusBadRequest, "InvalidParameterException", "Unsupported EncryptionAlgorithm: " + req.EncryptionAlgorithm})
 		return
 	}
 
-	keyMetadata, material, kerr := h.loadKeyForCrypto(normalizeKeyID(req.KeyID), ns)
-	if kerr != nil {
-		writeKMSError(w, kerr)
-		return
-	}
-
-	blob, err := encryptBlob(keyMetadata.KeyID, material, req.Plaintext, req.EncryptionContext)
+	blob, arn, err := h.EncryptFor(r, req.KeyID, req.Plaintext, req.EncryptionContext)
 	if err != nil {
-		writeKMSJSON(w, http.StatusInternalServerError, map[string]any{
-			"__type":  "InternalFailure",
-			"message": "Failed to encrypt: " + err.Error(),
-		})
+		writeKMSError(w, asError(err))
 		return
 	}
-
-	writeKMSJSON(w, http.StatusOK, EncryptOutput{
-		CiphertextBlob:      blob,
-		KeyID:               keyMetadata.ARN,
-		EncryptionAlgorithm: encryptionAlgorithm,
-	})
+	writeKMSJSON(w, http.StatusOK, EncryptOutput{CiphertextBlob: blob, KeyID: arn, EncryptionAlgorithm: "SYMMETRIC_DEFAULT"})
 }
 
-// Decrypt decrypts a ciphertext blob produced by Encrypt
+// Decrypt decrypts a ciphertext blob produced by Encrypt or GenerateDataKey
 func (h *Handler) Decrypt(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
 	var req DecryptInput
-	if err := util.DecodeAWSJSON(r, &req); err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Invalid request body: " + err.Error(),
-		})
+	if !decode(w, r, &req) {
 		return
 	}
-
 	if len(req.CiphertextBlob) == 0 {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidCiphertextException",
-			"message": "CiphertextBlob is required and must not be empty",
-		})
+		writeKMSError(w, &Error{http.StatusBadRequest, "InvalidCiphertextException", "CiphertextBlob is required and must not be empty"})
 		return
 	}
-
-	encryptionAlgorithm := req.EncryptionAlgorithm
-	if encryptionAlgorithm == "" {
-		encryptionAlgorithm = "SYMMETRIC_DEFAULT"
-	}
-	if encryptionAlgorithm != "SYMMETRIC_DEFAULT" {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidParameterException",
-			"message": "Unsupported EncryptionAlgorithm: " + encryptionAlgorithm,
-		})
+	if req.EncryptionAlgorithm != "" && req.EncryptionAlgorithm != "SYMMETRIC_DEFAULT" {
+		writeKMSError(w, &Error{http.StatusBadRequest, "InvalidParameterException", "Unsupported EncryptionAlgorithm: " + req.EncryptionAlgorithm})
 		return
 	}
 
 	// The blob names the key it was sealed under, so KeyId is optional
-	keyID, body, err := splitBlob(req.CiphertextBlob)
+	if req.KeyID != "" {
+		keyID, _, err := splitBlob(req.CiphertextBlob)
+		if err == nil {
+			_, rec, kerr := h.resolveKey(r, req.KeyID, true)
+			if kerr == nil && rec.Metadata.KeyID != keyID {
+				writeKMSError(w, &Error{http.StatusBadRequest, "IncorrectKeyException",
+					"The key specified does not match the key the ciphertext was encrypted under"})
+				return
+			}
+		}
+	}
+
+	plaintext, arn, err := h.DecryptFor(r, req.CiphertextBlob, req.EncryptionContext)
 	if err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidCiphertextException",
-			"message": "The ciphertext refers to a key that does not exist or is malformed",
-		})
+		writeKMSError(w, asError(err))
 		return
 	}
-
-	if req.KeyID != "" && normalizeKeyID(req.KeyID) != keyID {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "IncorrectKeyException",
-			"message": "The key specified does not match the key the ciphertext was encrypted under",
-		})
-		return
-	}
-
-	keyMetadata, material, kerr := h.loadKeyForCrypto(keyID, ns)
-	if kerr != nil {
-		writeKMSError(w, kerr)
-		return
-	}
-
-	plaintext, err := decryptBlob(material, body, req.EncryptionContext)
-	if err != nil {
-		writeKMSJSON(w, http.StatusBadRequest, map[string]any{
-			"__type":  "InvalidCiphertextException",
-			"message": "The ciphertext could not be decrypted with the supplied encryption context",
-		})
-		return
-	}
-
-	writeKMSJSON(w, http.StatusOK, DecryptOutput{
-		KeyID:               keyMetadata.ARN,
-		Plaintext:           plaintext,
-		EncryptionAlgorithm: encryptionAlgorithm,
-	})
+	writeKMSJSON(w, http.StatusOK, DecryptOutput{KeyID: arn, Plaintext: plaintext, EncryptionAlgorithm: "SYMMETRIC_DEFAULT"})
 }
