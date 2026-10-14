@@ -118,6 +118,15 @@ function jsonApiPost(url, target, body, tags) {
   });
 }
 
+// Lambda speaks REST-JSON at its real paths. The zip is an empty archive.
+const EMPTY_ZIP = 'UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
+function lambdaRequest(method, path, body, tags) {
+  return http.request(method, `${BASE_URL}/lambda/2015-03-31/functions${path}`, body === undefined ? null : JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', 'User-Agent': getUserAgent() },
+    tags,
+  });
+}
+
 function trackResponse(res, operation) {
   requestsTotal.add(1);
   activeVUs.add(__VU);
@@ -279,21 +288,17 @@ function iamFast() {
 // ─── Fast Lambda Operations ────────────────────────────────────────────────────
 function lambdaFast() {
   const functionName = `stress-fn-${resourceId()}`;
-  const lambdaUrl = `${BASE_URL}/lambda`;
-
-  const createRes = jsonApiPost(lambdaUrl, 'AWSLambda_20150331.CreateFunction', {
+  const createRes = lambdaRequest('POST', '', {
     FunctionName: functionName,
     Runtime: 'nodejs18.x',
     Role: 'arn:aws:iam::000000000000:role/test',
     Handler: 'index.handler',
-    Code: { ZipFile: 'UEsDBBQAAAAIAA==' },
+    Code: { ZipFile: EMPTY_ZIP },
   }, {});
   const created = trackResponse(createRes, 'lambda_create');
 
   if (created) {
-    const deleteRes = jsonApiPost(lambdaUrl, 'AWSLambda_20150331.DeleteFunction', {
-      FunctionName: functionName,
-    }, {});
+    const deleteRes = lambdaRequest('DELETE', `/${functionName}`, undefined, {});
     trackResponse(deleteRes, 'lambda_delete');
   }
 }

@@ -197,7 +197,7 @@ k6 run --no-color k6/tests/load.test.js
 | EC2 | RunInstances, DescribeInstances, TerminateInstances, CreateVolume, DescribeVolumes, DeleteVolume |
 | ElastiCache | CreateCacheCluster, DescribeCacheClusters, DeleteCacheCluster, ListTagsForResource |
 | KMS | CreateKey, DescribeKey, ListKeys, GetKeyPolicy, GetKeyRotationStatus, ListResourceTags, ScheduleKeyDeletion |
-| Lambda | CreateFunction, GetFunction, DeleteFunction, ListFunctions, GetFunctionConfiguration |
+| Lambda | CreateFunction, GetFunction, DeleteFunction (REST-JSON at /lambda/2015-03-31/functions) |
 | CloudWatch Logs | CreateLogGroup, DescribeLogGroups, DeleteLogGroup, CreateLogStream, DescribeLogStreams |
 | Route53 | CreateHostedZone, GetHostedZone, ListHostedZones, DeleteHostedZone, ChangeResourceRecordSets |
 | SSM | PutParameter, GetParameter, GetParameters, DescribeParameters, DeleteParameter, ListTagsForResource |

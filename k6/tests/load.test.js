@@ -71,6 +71,15 @@ function jsonApiPost(url, target, body, tags) {
   });
 }
 
+// Lambda speaks REST-JSON at its real paths. The zip is an empty archive.
+const EMPTY_ZIP = 'UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
+function lambdaRequest(method, path, body, tags) {
+  return http.request(method, `${BASE_URL}/lambda/2015-03-31/functions${path}`, body === undefined ? null : JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', 'User-Agent': getUserAgent() },
+    tags,
+  });
+}
+
 // ─── S3 ────────────────────────────────────────────────────────────────────────
 function s3Lifecycle() {
   const bucketName = `k6-load-bucket-${resourceId()}`;
@@ -241,12 +250,25 @@ function iamLifecycle() {
 }
 
 // ─── EC2 ───────────────────────────────────────────────────────────────────────
+// amazonLinuxImageId asks opensnack's EC2 image catalogue for an Amazon Linux
+// 2023 AMI. Image IDs differ per region, so they can't be hardcoded.
+function amazonLinuxImageId(ec2Url) {
+  const req = buildQueryRequest('DescribeImages', {
+    'Owner.1': 'amazon',
+    'Filter.1.Name': 'name',
+    'Filter.1.Value.1': 'al2023-ami-2023*-x86_64',
+  }, '2016-11-15');
+  const res = http.post(ec2Url, req.body, { headers: req.headers, tags: { operation: 'ec2_describe_images' } });
+  const m = /<imageId>(ami-[0-9a-f]+)<\/imageId>/.exec(res.body || '');
+  return m ? m[1] : '';
+}
+
 function ec2Lifecycle() {
   const ec2Url = `${BASE_URL}/ec2`;
   const start = Date.now();
 
   const createReq = buildQueryRequest('RunInstances', {
-    ImageId: 'ami-12345678',
+    ImageId: amazonLinuxImageId(ec2Url),
     InstanceType: 't3.micro',
     MinCount: '1',
     MaxCount: '1',
@@ -354,15 +376,14 @@ function kmsLifecycle() {
 // ─── Lambda ────────────────────────────────────────────────────────────────────
 function lambdaLifecycle() {
   const functionName = `k6-load-lambda-${resourceId()}`;
-  const lambdaUrl = `${BASE_URL}/lambda`;
   const start = Date.now();
 
-  const createRes = jsonApiPost(lambdaUrl, 'AWSLambda_20150331.CreateFunction', {
+  const createRes = lambdaRequest('POST', '', {
     FunctionName: functionName,
     Runtime: 'nodejs18.x',
     Role: 'arn:aws:iam::000000000000:role/test-role',
     Handler: 'index.handler',
-    Code: { ZipFile: 'UEsDBBQAAAAIAA==' },
+    Code: { ZipFile: EMPTY_ZIP },
   }, { operation: 'lambda_create_function' });
 
   const createSuccess = createRes.status >= 200 && createRes.status < 300;
@@ -371,11 +392,11 @@ function lambdaLifecycle() {
 
   if (createSuccess) {
     terraformApplyCounter.add(1);
-    jsonApiPost(lambdaUrl, 'AWSLambda_20150331.GetFunction', { FunctionName: functionName }, { operation: 'lambda_get_function' });
+    lambdaRequest('GET', `/${functionName}`, undefined, { operation: 'lambda_get_function' });
     sleep(0.1);
 
     const deleteStart = Date.now();
-    const deleteRes = jsonApiPost(lambdaUrl, 'AWSLambda_20150331.DeleteFunction', { FunctionName: functionName }, { operation: 'lambda_delete_function' });
+    const deleteRes = lambdaRequest('DELETE', `/${functionName}`, undefined, { operation: 'lambda_delete_function' });
     const deleteSuccess = deleteRes.status >= 200 && deleteRes.status < 300;
     resourceDeleteRate.add(deleteSuccess);
     apiLatency.add(Date.now() - deleteStart);
