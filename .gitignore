@@ -74,3 +74,7 @@ opensnack.log.*
 
 # macOS
 .DS_Store
+
+# air hot-reload build output (see .air.toml)
+tmp/
+build-errors.log
