@@ -7,10 +7,20 @@ package router
 import (
 	"net/http"
 	"strings"
+	"time"
 
+	"opensnack/internal/auth"
+	"opensnack/internal/awsresponses"
+	"opensnack/internal/inspect"
+	"opensnack/internal/limits"
+
+	"opensnack/internal/api/apigatewayv2"
+	"opensnack/internal/api/cloudfront"
+	"opensnack/internal/api/cloudwatch"
 	"opensnack/internal/api/dynamodb"
 	"opensnack/internal/api/ec2"
 	"opensnack/internal/api/elasticache"
+	"opensnack/internal/api/events"
 	"opensnack/internal/api/iam"
 	"opensnack/internal/api/kms"
 	"opensnack/internal/api/lambda"
@@ -39,16 +49,73 @@ import (
 // ?location has NO VALUE in AWS requests (it's literally '?location')
 // So QueryParam("location") == "" but the parameter *exists*.
 // We must check for existence, not value.
+
+// Config is what the router needs beyond the store.
+type Config struct {
+	// Auth resolves the tenant from the request. Nil means dev mode with no
+	// credential source, which is what the tests use.
+	Auth *auth.Authenticator
+	// InternalToken guards the inspection API under /_opensnack/v1/. Without
+	// one the API is only served in dev mode.
+	InternalToken string
+	// Limits caps request sizes, resources per namespace and request rates.
+	// The zero value disables them all.
+	Limits limits.Config
+	// Clock drives EventBridge event times and its scheduler. Nil means
+	// time.Now.
+	Clock func() time.Time
+	// EventDeliverers replace the EventBridge target deliverers by ARN
+	// service ("sqs", "sns", "lambda"). Tests use it.
+	EventDeliverers map[string]events.Deliverer
+}
+
+// Server is the HTTP handler plus the background work that goes with it.
+type Server struct {
+	http.Handler
+	// Scheduler fires scheduled EventBridge rules. The caller starts and
+	// stops it; it is nil when the store can't list across namespaces.
+	Scheduler *events.Scheduler
+	// Events is the EventBridge handler, for its delivery log.
+	Events *events.Handler
+	// ESM polls SQS for Lambda event source mappings. Like Scheduler, the
+	// caller starts and stops it, and it is nil without an Inspector.
+	ESM *ESMPoller
+}
+
+// New builds the router in dev mode: every request is accepted and the
+// namespace comes from the legacy User-Agent token or the access key ID.
 func New(store resource.Store) http.Handler {
+	return NewWithConfig(store, Config{})
+}
+
+func NewWithConfig(store resource.Store, cfg Config) http.Handler {
+	return NewServer(store, cfg)
+}
+
+// NewServer builds the router and its background services.
+func NewServer(store resource.Store, cfg Config) *Server {
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
+	if cfg.Auth == nil {
+		cfg.Auth = &auth.Authenticator{Mode: auth.ModeDev, Now: time.Now}
+	}
+	cfg.Auth.ExemptPrefixes = append(cfg.Auth.ExemptPrefixes, internalPrefix)
+
 	mux := http.NewServeMux()
 
 	s3h := s3.NewHandler(store)
 	sqsh := sqs.NewHandler(store)
 	snsh := sns.NewHandler(store)
-	stsh := sts.NewHandler()
+	// Keys STS issues verify through the authenticator like any other.
+	sessions := sts.NewSessions()
+	cfg.Auth.AddSource(sessions)
+	stsh := sts.NewHandler(store, sessions)
+	snsh.RegisterDeliverer("sqs", sqsh)
 	iamh := iam.NewHandler(store)
 	logsh := logs.NewHandler(store)
 	lambdah := lambda.NewHandler(store)
+	snsh.RegisterDeliverer("lambda", snsLambda{lambdaInvoker{lambdah}})
 	s3ctl := s3control.NewHandler(store)
 	dynamoh := dynamodb.NewHandler(store)
 	kmsh := kms.NewHandler(store)
@@ -57,9 +124,116 @@ func New(store resource.Store) http.Handler {
 	secretsmanagerh := secretsmanager.NewHandler(store)
 	ssmh := ssm.NewHandler(store)
 	route53h := route53.NewHandler(store)
+	cloudwatchh := cloudwatch.NewHandler(store)
+	cloudwatchh.SetNotifier(snsNotifier{snsh})
 
-	// Apply middleware
-	handler := DebugLoggerMiddleware(SigV4Middleware(mux))
+	// EventBridge delivers to other services through their public HTTP
+	// interfaces, so it doesn't depend on how they work inside.
+	eventsh := events.NewHandler(store)
+	eventsh.Now = cfg.Clock
+	eventsh.Deliverers.Set("sqs", events.SQSDeliverer{Handler: http.HandlerFunc(sqsh.Dispatch)})
+	eventsh.Deliverers.Set("sns", events.SNSDeliverer{Handler: http.HandlerFunc(snsh.Dispatch)})
+	eventsh.Deliverers.Set("lambda", eventsLambda{lambdaInvoker{lambdah}})
+	for svc, d := range cfg.EventDeliverers {
+		eventsh.Deliverers.Set(svc, d)
+	}
+
+	apigwh := apigatewayv2.NewHandler(store)
+	apigwh.Invoker = apigwInvoker{lambdaInvoker{lambdah}}
+	lambdah.Logs = logsSink{store}
+	go apigwh.SyncAll()
+	cfh := cloudfront.NewHandler(store)
+	cfh.Objects = s3Objects(s3h)
+	// CloudFront in front of API Gateway reaches the execute-api data plane
+	// in process.
+	cfh.Loopback = func(host string) http.Handler {
+		if _, _, ok := apigatewayv2.ParseHost(host); ok {
+			return http.HandlerFunc(apigwh.ServeDataPlane)
+		}
+		return nil
+	}
+
+	// Requests that say which service they are for (real AWS host names,
+	// X-Amz-Target, the SigV4 scope) go straight to it; the rest fall back
+	// to the legacy path routes on mux.
+	dispatch := func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, internalPrefix) {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		service, bucket := serviceFor(r)
+		switch service {
+		case "s3":
+			if bucket != "" {
+				r = withVirtualHostBucket(r, bucket)
+			}
+			s3Handler(s3h)(w, r)
+		case "s3-control":
+			s3ControlHandler(s3ctl)(w, stripPrefix(r, "/s3-control"))
+		case "lambda":
+			lambdah.ServeREST(w, r)
+		case "route53":
+			methods(route53h.Dispatch, "GET", "POST", "DELETE")(w, r)
+		case "apigateway":
+			if !strings.HasPrefix(r.URL.Path, "/v2/") {
+				unsupportedService(w, "apigateway (REST APIs, v1)")
+				return
+			}
+			apigwh.ServeHTTP(w, r)
+		case "cloudfront":
+			cfh.ServeHTTP(w, r)
+		case "sts":
+			methods(stsh.Dispatch, "GET", "POST")(w, r)
+		case "iam":
+			methods(iamh.Dispatch, "GET", "POST")(w, r)
+		case "sqs":
+			methods(sqsh.Dispatch, "GET", "POST")(w, r)
+		case "sns":
+			methods(snsh.Dispatch, "GET", "POST")(w, r)
+		case "ec2":
+			methods(ec2h.Dispatch, "GET", "POST")(w, r)
+		case "elasticache":
+			methods(elasticacheh.Dispatch, "GET", "POST")(w, r)
+		case "kms":
+			methods(kmsh.Dispatch, "POST")(w, r)
+		case "dynamodb":
+			methods(dynamoh.Dispatch, "POST")(w, r)
+		case "logs":
+			methods(logsh.Dispatch, "POST")(w, r)
+		case "cloudwatch":
+			methods(cloudwatchh.Dispatch, "GET", "POST")(w, r)
+		case "secretsmanager":
+			methods(secretsmanagerh.Dispatch, "POST")(w, r)
+		case "ssm":
+			methods(ssmh.Dispatch, "POST")(w, r)
+		case "events":
+			methods(eventsh.Dispatch, "POST")(w, r)
+		case "":
+			mux.ServeHTTP(w, r)
+		default:
+			unsupportedService(w, service)
+		}
+	}
+
+	insp, _ := store.(resource.Inspector)
+	limiter := limits.New(cfg.Limits, insp)
+	authed := cfg.Auth.Middleware(limiter.Middleware(DebugLoggerMiddleware(http.HandlerFunc(dispatch))))
+	// The data planes (execute-api, cloudfront.net) are anonymous HTTP, so
+	// they go round authentication and the per-tenant limits; they find
+	// their tenant from the API or distribution ID in the host name.
+	apigwData := DebugLoggerMiddleware(http.HandlerFunc(apigwh.ServeDataPlane))
+	cfData := DebugLoggerMiddleware(http.HandlerFunc(cfh.ServeDataPlane))
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if _, _, ok := apigatewayv2.ParseHost(r.Host); ok {
+			apigwData.ServeHTTP(w, r)
+			return
+		}
+		if _, ok := cloudfront.ParseHost(r.Host); ok {
+			cfData.ServeHTTP(w, r)
+			return
+		}
+		authed.ServeHTTP(w, r)
+	})
 
 	// Helper to parse form values
 	parseForm := func(r *http.Request) {
@@ -88,11 +262,11 @@ func New(store resource.Store) http.Handler {
 
 		// If path is empty (root "/"), handle query dispatch or ListBuckets
 		if path == "" {
-			// JSON-protocol services (KMS, DynamoDB, Logs, SecretsManager, SSM)
-			// are addressed by X-Amz-Target at the root, which is where every AWS
-			// SDK and the CLI send them. The per-service paths below are an
+			// JSON-protocol services (KMS, DynamoDB, Logs, SecretsManager, SSM,
+			// SQS) are addressed by X-Amz-Target at the root, which is where every
+			// AWS SDK and the CLI send them. The per-service paths below are an
 			// opensnack convenience, not something a real client ever uses.
-			if h := jsonTargetHandler(r, kmsh, dynamoh, logsh, secretsmanagerh, ssmh); h != nil {
+			if h := jsonTargetHandler(r, kmsh, dynamoh, logsh, secretsmanagerh, ssmh, sqsh); h != nil {
 				if r.Method != "POST" {
 					http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 					return
@@ -104,14 +278,14 @@ func New(store resource.Store) http.Handler {
 			if r.Method == "GET" {
 				action := getFormValue(r, "Action")
 				if action != "" {
-					queryDispatch(w, r, stsh, iamh, sqsh, snsh)
+					queryDispatch(w, r, stsh, iamh, sqsh, snsh, ec2h, elasticacheh)
 					return
 				}
 				s3h.ListBuckets(w, r)
 				return
 			}
 			if r.Method == "POST" {
-				queryDispatch(w, r, stsh, iamh, sqsh, snsh)
+				queryDispatch(w, r, stsh, iamh, sqsh, snsh, ec2h, elasticacheh)
 				return
 			}
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -123,6 +297,30 @@ func New(store resource.Store) http.Handler {
 	}
 
 	mux.HandleFunc("/", rootHandler)
+
+	if insp, ok := store.(resource.Inspector); ok && (cfg.InternalToken != "" || cfg.Auth.Mode == auth.ModeDev) {
+		api := &inspect.API{
+			Store:   insp,
+			Token:   cfg.InternalToken,
+			Objects: s3h.ReadObject,
+			Cleaners: []inspect.NamespaceCleaner{
+				s3.DeleteNamespaceObjects,
+				logs.NamespaceCleaner(store),
+				cloudwatch.EngineFor(store).DeleteNamespace,
+				sqsh.DeleteNamespaceMessages,
+			},
+			Routes: map[string]http.HandlerFunc{
+				"GET namespaces/{ns}/ec2/reachability": ec2h.ReachabilityHandler,
+			},
+		}
+		mux.Handle(inspect.Prefix, api.Handler())
+		mux.Handle("GET "+inspect.Prefix+"events/deliveries", eventsh.Log.Handler(cfg.InternalToken))
+	}
+
+	mux.HandleFunc(internalPrefix+"health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok\n"))
+	})
 
 	// STS routes
 	mux.HandleFunc("/sts", func(w http.ResponseWriter, r *http.Request) {
@@ -158,18 +356,14 @@ func New(store resource.Store) http.Handler {
 
 	// S3 Control routes
 	mux.HandleFunc("/s3-control/", func(w http.ResponseWriter, r *http.Request) {
-		s3ctl.ListTagsForResource(w, r)
+		s3ControlHandler(s3ctl)(w, stripPrefix(r, "/s3-control"))
 	})
 
 	// Lambda routes - must come before S3 wildcard routes
-	mux.HandleFunc("/lambda", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
-			lambdah.Dispatch(w, r)
-		} else {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	mux.HandleFunc("/lambda/", lambdaHandler(lambdah))
+	mux.HandleFunc("/lambda", lambdah.ServeREST)
+	mux.HandleFunc("/lambda/", lambdah.ServeREST)
+	// GetFunction's Code.Location: presigned-style, so outside SigV4.
+	mux.HandleFunc(lambda.CodeDownloadPrefix, lambdah.ServeCodeDownload)
 
 	// SQS routes
 	mux.HandleFunc("/sqs", func(w http.ResponseWriter, r *http.Request) {
@@ -329,8 +523,18 @@ func New(store resource.Store) http.Handler {
 
 	// S3 routes are handled by rootHandler above
 
-	return handler
+	srv := &Server{Handler: handler, Events: eventsh}
+	if insp != nil {
+		srv.Scheduler = events.NewScheduler(eventsh, insp)
+		srv.Scheduler.Now = cfg.Clock
+		srv.ESM = newESMPoller(insp, lambdah, http.HandlerFunc(sqsh.Dispatch))
+	}
+	return srv
 }
+
+// internalPrefix is opensnack's own API (health, and the inspection API for
+// external checkers). It sits outside AWS authentication and checks its own token.
+const internalPrefix = "/_opensnack/"
 
 // jsonTargetHandler maps an X-Amz-Target header to the handler that owns that
 // service, or nil when the request is not a JSON-protocol call.
@@ -341,6 +545,7 @@ func jsonTargetHandler(
 	logsh *logs.Handler,
 	smh *secretsmanager.Handler,
 	ssmh *ssm.Handler,
+	sqsh *sqs.Handler,
 ) http.HandlerFunc {
 	target := r.Header.Get("X-Amz-Target")
 	if target == "" {
@@ -358,11 +563,16 @@ func jsonTargetHandler(
 		return smh.Dispatch
 	case strings.HasPrefix(target, "AmazonSSM."):
 		return ssmh.Dispatch
+	// SQS moved from the Query protocol to JSON in 2023; AWS CLI v2 and the
+	// current SDKs only speak this form. The Query path below still serves the
+	// older clients that send Action/Version form bodies.
+	case strings.HasPrefix(target, "AmazonSQS."):
+		return sqsh.Dispatch
 	}
 	return nil
 }
 
-func queryDispatch(w http.ResponseWriter, r *http.Request, stsh *sts.Handler, iamh *iam.Handler, sqsh *sqs.Handler, snsh *sns.Handler) {
+func queryDispatch(w http.ResponseWriter, r *http.Request, stsh *sts.Handler, iamh *iam.Handler, sqsh *sqs.Handler, snsh *sns.Handler, ec2h *ec2.Handler, elasticacheh *elasticache.Handler) {
 	r.ParseForm()
 	action := r.FormValue("Action")
 	if action == "" {
@@ -380,165 +590,19 @@ func queryDispatch(w http.ResponseWriter, r *http.Request, stsh *sts.Handler, ia
 		sqsh.Dispatch(w, r)
 	case sns.APIVersion:
 		snsh.Dispatch(w, r)
+	case ec2.APIVersion:
+		ec2h.Dispatch(w, r)
+	case elasticache.APIVersion:
+		elasticacheh.Dispatch(w, r)
 	default:
 		w.WriteHeader(http.StatusBadRequest)
 	}
 }
 
-func lambdaHandler(lambdah *lambda.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		method := r.Method
-
-		// Handle code-signing-config routes
-		if strings.Contains(path, "/code-signing-config") {
-			if method == "GET" || method == "HEAD" || method == "OPTIONS" {
-				// Extract function name from path
-				parts := strings.Split(path, "/")
-				for i, part := range parts {
-					if part == "functions" && i+1 < len(parts) {
-						// Create a request with function name in context or modify path
-						lambdah.GetFunctionCodeSigningConfigREST(w, r)
-						return
-					}
-				}
-			}
-			if method == "POST" {
-				lambdah.Dispatch(w, r)
-				return
-			}
-		}
-
-		// Handle specific Lambda REST routes
-		if strings.HasSuffix(path, "/configuration") && method == "GET" {
-			lambdah.GetFunctionConfigurationREST(w, r)
-			return
-		}
-		if strings.HasSuffix(path, "/versions") && method == "GET" {
-			lambdah.ListVersionsByFunctionREST(w, r)
-			return
-		}
-		if strings.Contains(path, "/functions/") && method == "GET" && !strings.Contains(path, "/code-signing-config") && !strings.Contains(path, "/configuration") && !strings.Contains(path, "/versions") {
-			lambdah.GetFunctionREST(w, r)
-			return
-		}
-		if strings.Contains(path, "/functions/") && method == "DELETE" {
-			lambdah.DeleteFunctionREST(w, r)
-			return
-		}
-
-		// Default: try Dispatch for POST, otherwise 405
-		if method == "POST" {
-			lambdah.Dispatch(w, r)
-			return
-		}
-
-		http.Error(w, "Method "+method+" not allowed for "+path, http.StatusMethodNotAllowed)
-	}
-}
-
+// s3Handler serves the S3 REST API; the s3 package routes it by method,
+// path and sub-resource.
 func s3Handler(s3h *s3.Handler) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		method := r.Method
-
-		// Remove leading slash
-		if strings.HasPrefix(path, "/") {
-			path = path[1:]
-		}
-
-		// Split path into bucket and key
-		parts := strings.SplitN(path, "/", 2)
-		bucket := parts[0]
-		key := ""
-		if len(parts) > 1 {
-			key = parts[1]
-		}
-
-		// Handle root bucket operations
-		if bucket == "" {
-			if method == "GET" {
-				s3h.ListBuckets(w, r)
-			}
-			return
-		}
-
-		// Handle bucket-level operations (no key)
-		if key == "" {
-			query := r.URL.Query()
-			if method == "PUT" {
-				// Check for query parameters
-				if _, exists := query["versioning"]; exists {
-					s3h.PutBucketVersioning(w, r)
-					return
-				}
-				if _, exists := query["lifecycle"]; exists {
-					s3h.PutBucketLifecycleConfiguration(w, r)
-					return
-				}
-				if _, exists := query["acl"]; exists {
-					s3h.PutBucketAcl(w, r)
-					return
-				}
-				if _, exists := query["policy"]; exists {
-					s3h.PutBucketPolicy(w, r)
-					return
-				}
-				s3h.CreateBucket(w, r)
-				return
-			}
-			if method == "DELETE" {
-				s3h.DeleteBucket(w, r)
-				return
-			}
-			if method == "HEAD" {
-				s3h.HeadBucket(w, r)
-				return
-			}
-			if method == "GET" {
-				// Check for query parameters
-				if _, exists := query["versioning"]; exists {
-					s3h.GetBucketVersioning(w, r)
-					return
-				}
-				if _, exists := query["lifecycle"]; exists {
-					s3h.GetBucketLifecycleConfiguration(w, r)
-					return
-				}
-				if _, exists := query["acl"]; exists {
-					s3h.GetBucketAcl(w, r)
-					return
-				}
-				if _, exists := query["policy"]; exists {
-					s3h.GetBucketPolicy(w, r)
-					return
-				}
-				if _, exists := query["location"]; exists {
-					s3h.GetBucketLocation(w, r)
-					return
-				}
-				// GET /bucket (no query params) is not valid
-				http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Handle object-level operations (has key)
-		switch method {
-		case "PUT":
-			s3h.PutObject(w, r)
-		case "GET":
-			s3h.GetObject(w, r)
-		case "HEAD":
-			s3h.HeadObject(w, r)
-		case "DELETE":
-			s3h.DeleteObject(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	}
+	return s3h.Dispatch
 }
 
 func firstNonEmpty(values ...string) string {
@@ -580,4 +644,23 @@ func isSQSAction(action string) bool {
 		}
 	}
 	return false
+}
+
+// s3ControlHandler routes the S3 Control REST API (paths under /v20180820/).
+func s3ControlHandler(s3ctl *s3control.Handler) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v20180820/tags") {
+			s3ctl.Tags(w, r)
+			return
+		}
+		awsresponses.WriteS3ErrorXML(w, http.StatusNotImplemented, "NotImplemented",
+			"opensnack does not implement this S3 Control operation", r.URL.Path)
+	}
+}
+
+// unsupportedService answers requests for AWS services opensnack doesn't
+// emulate, rather than letting them fall through to S3.
+func unsupportedService(w http.ResponseWriter, service string) {
+	awsresponses.WriteErrorXML(w, http.StatusBadRequest, "UnsupportedService",
+		"opensnack does not implement the "+service+" service", "")
 }

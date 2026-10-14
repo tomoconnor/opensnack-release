@@ -51,11 +51,7 @@ func DebugLoggerMiddleware(next http.Handler) http.Handler {
 		}
 
 		action, version := extractQueryAction(r)
-		ns := util.NamespaceFromHeader(r)
-		// ns := r.Header.Get("X-Opensnack-Namespace")
-		if ns == "" {
-			ns = "undefined"
-		}
+		id := util.IdentityFrom(r)
 
 		zap.L().Info("request",
 			zap.String("method", r.Method),
@@ -67,7 +63,8 @@ func DebugLoggerMiddleware(next http.Handler) http.Handler {
 			zap.Duration("duration", duration),
 			zap.String("action", action),
 			zap.String("version", version),
-			zap.String("namespace", ns),
+			zap.String("namespace", id.Namespace),
+			zap.String("region", id.Region),
 		)
 
 	})
