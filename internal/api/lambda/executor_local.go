@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -148,7 +149,12 @@ func (e *LocalExecutor) Invoke(ctx context.Context, inv *Invocation) (*Invocatio
 	out := &cappedBuffer{max: maxLogCapture}
 	cmd.Stdout, cmd.Stderr = out, out
 	configureProcess(cmd)
-	sb.stop = func() { killProcess(cmd) }
+	var proc atomic.Pointer[os.Process]
+	sb.stop = func() {
+		if p := proc.Load(); p != nil {
+			killProcess(p)
+		}
+	}
 
 	d.register(sb)
 	d.submit(c)
@@ -156,6 +162,7 @@ func (e *LocalExecutor) Invoke(ctx context.Context, inv *Invocation) (*Invocatio
 		d.remove(sb, sandboxDeath{Reason: err.Error()})
 		return nil, err
 	}
+	proc.Store(cmd.Process)
 	exited := make(chan error, 1)
 	go func() { exited <- cmd.Wait() }()
 

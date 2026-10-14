@@ -7,6 +7,7 @@
 package lambda
 
 import (
+	"os"
 	"os/exec"
 	"time"
 )
@@ -15,10 +16,6 @@ func configureProcess(cmd *exec.Cmd) {
 	cmd.WaitDelay = 2 * time.Second
 }
 
-func killProcess(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		cmd.Process.Kill()
-	}
-}
+func killProcess(p *os.Process) { p.Kill() }
 
 func maxMemoryMB(*exec.Cmd) int { return 0 }

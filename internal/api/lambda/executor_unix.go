@@ -7,6 +7,7 @@
 package lambda
 
 import (
+	"os"
 	"os/exec"
 	"runtime"
 	"syscall"
@@ -21,10 +22,8 @@ func configureProcess(cmd *exec.Cmd) {
 }
 
 // killProcess kills the function's whole process group.
-func killProcess(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+func killProcess(p *os.Process) {
+	syscall.Kill(-p.Pid, syscall.SIGKILL)
 }
 
 // maxMemoryMB is the process's peak resident set size. ru_maxrss is in
