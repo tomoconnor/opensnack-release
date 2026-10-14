@@ -1,0 +1,14 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# The namespace opensnack's Lambda sandbox pods run in. The "restricted"
+# Pod Security Standard rejects any pod that isn't locked down the way the
+# executor builds them.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: opensnack-lambda
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

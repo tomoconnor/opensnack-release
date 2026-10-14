@@ -18,3 +18,17 @@ jobs:
           go-version-file: go.mod
       - run: go vet ./...
       - run: go test ./...
+
+  # The Kubernetes Lambda executor end to end, in a k3d cluster with the
+  # default runtime (runc) standing in for a sandboxing RuntimeClass.
+  lambda-kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Install k3d
+        run: curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/v5.8.3/install.sh | TAG=v5.8.3 bash
+      - run: deploy/k8s/lambda-it/run.sh

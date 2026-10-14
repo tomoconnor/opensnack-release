@@ -61,6 +61,66 @@ OpenSnack answers on the real AWS host names (`{service}.{region}.amazonaws.com`
 | `OPENSNACK_RATE_LIMIT`, `OPENSNACK_RATE_BURST` | off, 2x rate | Requests per second per namespace. Over the rate, requests get the throttling codes SDKs retry (`SlowDown`, `ThrottlingException`, `Throttling`). |
 | `OPENSNACK_PG_MAX_OPEN`, `OPENSNACK_PG_MAX_IDLE` | 25, 10 | Postgres connection pool, per process. |
 
+## Lambda execution
+
+Invoke runs function code through an *executor*, chosen by `OPENSNACK_LAMBDA_EXECUTOR`. With none set, Invoke returns a 501 `ServiceException`.
+
+- `kubernetes` runs each function in its own pod in a dedicated namespace, under a RuntimeClass of your choice (a microVM runtime such as Kata Containers for untrusted code). This is the executor for shared deployments.
+- `local` runs `python3` and `node` functions as plain processes on the OpenSnack host, **with no sandbox**. Use it for development only, never with untrusted code.
+
+Both executors run Python (`python3.x`) and Node.js (`nodejs*.x`) zip functions. Container image functions can't be invoked. Functions talk to OpenSnack through the [Lambda Runtime API](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-api.html), which OpenSnack serves itself, so a sandbox stays warm and takes invocation after invocation as it would in AWS. The function's timeout starts when its sandbox takes the invocation, so a cold start doesn't count against it. Functions get temporary credentials for their execution role (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), issued by OpenSnack's STS. The credentials belong to the function's own namespace and account. The variables Lambda defines (`AWS_*` for the function, `_HANDLER`, `LAMBDA_*` and so on) can't be overridden by the function's own environment. Output is captured per invocation and sent to CloudWatch Logs between the usual START, END and REPORT lines.
+
+Every executor applies these settings:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPENSNACK_LAMBDA_CONCURRENCY_PER_NAMESPACE` | 2 | Invocations in flight per namespace (0: no cap). A function's `ReservedConcurrentExecutions` caps it too. Over either cap, a synchronous invoke gets `TooManyRequestsException` (429). |
+| `OPENSNACK_LAMBDA_ASYNC_QUEUE_PER_NAMESPACE` | 100 | Event invocations a namespace can have waiting. Event invocations are retried after throttles (with backoff, for up to `MaximumEventAgeInSeconds`) and after function errors (`MaximumRetryAttempts`, default 2). The queue is in memory, so a restart loses it. |
+| `OPENSNACK_LAMBDA_MAX_LOG_BYTES` | 256 KiB | Output kept per invocation. |
+| `OPENSNACK_LAMBDA_AWS_ENDPOINT_URL` | unset | `AWS_ENDPOINT_URL` in every function's environment, for sandboxes that can't resolve the real AWS host names to OpenSnack. |
+
+Payloads are capped at 6 MB for synchronous invokes and 1 MB for asynchronous ones, as in AWS. API Gateway's integration timeout (30 seconds by default) covers the whole call, cold start included.
+
+### Kubernetes executor
+
+Each pod serves one version of one function, with one configuration, and runs one invocation at a time. It fetches the function's code, environment and credentials from the Runtime API when it starts; the pod object holds none of them. It stays warm until it has been idle for `OPENSNACK_LAMBDA_K8S_IDLE_TTL`. Updating or deleting a function retires its pods once their current invocations finish. Deleting a namespace through the inspection API kills its pods at once. When OpenSnack starts, it deletes any sandbox pods left over from a previous run.
+
+Every pod runs:
+
+- in the sandbox namespace, under the configured RuntimeClass and a service account with no RBAC
+- with no service account token and no service links
+- as a random non-root UID, with a read-only root filesystem, all capabilities dropped and the `RuntimeDefault` seccomp profile
+- with a size-limited `emptyDir` at `/tmp` and another at `/var/task`
+- with a memory limit equal to `MemorySize`, a CPU limit in proportion to it (one vCPU at 1769 MB), a process limit, and an `activeDeadlineSeconds` backstop
+
+Pod names and labels carry hashes, never the tenant's namespace or function names. The Runtime API accepts each pod's own token only from that pod's own address, so one sandbox can't take or answer another's invocations.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `OPENSNACK_LAMBDA_K8S_IMAGE_PYTHON`, `OPENSNACK_LAMBDA_K8S_IMAGE_NODEJS` | unset | Runtime images (built from [deploy/lambda-runtime/Dockerfile](deploy/lambda-runtime/Dockerfile)). Pin them by digest. Set at least one; a runtime family with no image can't be invoked. |
+| `OPENSNACK_LAMBDA_K8S_RUNTIME_API` | required | `host:port` that sandbox pods reach the Runtime API on: a Service in front of the listener below. |
+| `OPENSNACK_LAMBDA_RUNTIME_LISTEN_ADDR` | `:9001` | Where OpenSnack serves the Runtime API. It's a separate listener from the AWS API, so keep it off every Ingress. |
+| `OPENSNACK_LAMBDA_K8S_NAMESPACE` | `opensnack-lambda` | Namespace for sandbox pods. |
+| `OPENSNACK_LAMBDA_K8S_RUNTIME_CLASS` | unset | The pods' `runtimeClassName`. Unset uses the cluster's default runtime: fine for CI, not for untrusted code. |
+| `OPENSNACK_LAMBDA_K8S_SERVICE_ACCOUNT` | `opensnack-lambda` | The pods' service account. It should have no role bindings. |
+| `OPENSNACK_LAMBDA_K8S_MAX_PODS` | 20 | Sandbox pods across all tenants. At the cap, an idle pod makes way for a new one; with none idle, the invocation is throttled. |
+| `OPENSNACK_LAMBDA_K8S_IDLE_TTL` | `5m` | How long an idle pod stays warm. |
+| `OPENSNACK_LAMBDA_K8S_START_TIMEOUT` | `1m` | How long a cold start may take before the invocation fails. |
+| `OPENSNACK_LAMBDA_K8S_MAX_POD_LIFETIME` | `1h` | How long a pod takes new invocations. Its credentials and `activeDeadlineSeconds` are sized from this. |
+| `OPENSNACK_LAMBDA_K8S_TMP_SIZE`, `OPENSNACK_LAMBDA_K8S_TASK_SIZE` | `512Mi`, `320Mi` | Size limits of `/tmp` and of `/var/task`, where the code is unpacked. |
+| `OPENSNACK_LAMBDA_K8S_MAX_PROCS` | 1024 | Processes and threads per sandbox (`RLIMIT_NPROC`; each pod has its own UID). Also set the kubelet's `podPidsLimit` as a node-wide backstop. |
+| `OPENSNACK_LAMBDA_K8S_MB_PER_VCPU`, `OPENSNACK_LAMBDA_K8S_MIN_CPU_MILLIS` | 1769, 0 | CPU limit = memory ÷ this, in vCPUs, with an optional floor in millicores. |
+| `OPENSNACK_LAMBDA_K8S_UID_BASE`, `OPENSNACK_LAMBDA_K8S_UID_COUNT` | 100000, 50000 | Each pod runs as a random UID in this range. |
+| `OPENSNACK_LAMBDA_K8S_CA_CONFIGMAP` | unset | ConfigMap in the sandbox namespace whose `ca.crt` the sandboxes trust as well as the system CAs, for an OpenSnack that serves AWS host names with its own CA. |
+| `OPENSNACK_LAMBDA_K8S_POLL_INTERVAL` | `2s` | How often pods are checked for crashes, idleness and orphans. |
+| `OPENSNACK_LAMBDA_K8S_BIND_POD_IP` | `true` | Also check that Runtime API requests come from the pod's own address. Turn this off only if traffic to OpenSnack is source-NATed. |
+| `OPENSNACK_LAMBDA_K8S_INSTANCE` | `opensnack` | Label value marking this OpenSnack's pods. |
+| `OPENSNACK_LAMBDA_K8S_KUBECONFIG`, `OPENSNACK_LAMBDA_K8S_CONTEXT` | unset | Outside a cluster (development), the kubeconfig and context to use. `KUBECONFIG` works too. In a pod, OpenSnack uses its service account. It never falls back to `~/.kube/config`. |
+
+[deploy/k8s/lambda/](deploy/k8s/lambda/) has example manifests: the sandbox namespace (with the `restricted` Pod Security Standard), its service account, the Role and RoleBinding OpenSnack needs (pods: create, get, list, watch, delete, in that namespace only), a NetworkPolicy that lets sandboxes reach only OpenSnack and DNS and accept nothing, and the OpenSnack side: a Runtime API Service, a policy that admits only sandboxes to it, and Deployment settings. The executor doesn't create the NetworkPolicy, so check that your cluster enforces NetworkPolicy.
+
+Run OpenSnack as a **single replica** with the `Recreate` strategy. Each replica deletes sandbox pods it doesn't know about, and two replicas would also each enforce their own caps.
+
 ## Inspection API
 
 `/_opensnack/v1/` is OpenSnack's own API, for checkers and test harnesses. It sits outside AWS authentication and requires `Authorization: Bearer $OPENSNACK_INTERNAL_TOKEN`. Without a token it is served only in dev mode. Keep it off the public network.
@@ -98,6 +158,12 @@ Run Go tests:
 go test ./...
 ```
 
+The Kubernetes executor's integration tests run in a throwaway k3d cluster (Docker, k3d and kubectl needed). The script builds the images, deploys [deploy/k8s/lambda-it](deploy/k8s/lambda-it) and runs the tests tagged `k8sintegration`:
+
+```bash
+deploy/k8s/lambda-it/run.sh
+```
+
 Load tests live in [k6/README.md](k6/README.md).
 
 ## Infra clients
@@ -118,7 +184,7 @@ The following services and operations are implemented. Each Terraform resource b
 - **EC2**: Run/Describe/Terminate/Stop/Start/RebootInstances, Modify/DescribeInstanceAttribute, instance credit, metadata and maintenance options, IAM instance profile associations; Create/Delete/Describe/Attach/Detach/ModifyVolume; Create/Import/Delete/DescribeKeyPairs; DescribeImages (a fixed catalogue of Amazon Linux and Ubuntu AMIs), DescribeInstanceTypes, DescribeInstanceTypeOfferings, DescribeAvailabilityZones, DescribeRegions, DescribeAccountAttributes; Create/Delete/DescribeTags with filters on every Describe call
 - **ElastiCache**: CreateCacheCluster, DescribeCacheClusters, DeleteCacheCluster, ListTagsForResource
 - **KMS**: CreateKey, DescribeKey, ListKeys, UpdateKeyDescription, EnableKey, DisableKey, ScheduleKeyDeletion, CancelKeyDeletion, Get/PutKeyPolicy, ListKeyPolicies, Enable/DisableKeyRotation, GetKeyRotationStatus, Tag/UntagResource, ListResourceTags, Create/Update/Delete/ListAliases, Encrypt, Decrypt, GenerateDataKey, GenerateDataKeyWithoutPlaintext
-- **Lambda** (REST-JSON at the real paths): CreateFunction (ZipFile or S3), GetFunction (Code.Location is a signed opensnack download URL, valid 10 minutes), Get/UpdateFunctionConfiguration, UpdateFunctionCode, DeleteFunction, ListFunctions, PublishVersion, ListVersionsByFunction, Create/Get/Update/Delete/ListAliases, AddPermission, RemovePermission, GetPolicy, TagResource, UntagResource, ListTags, Put/Get/DeleteFunctionConcurrency, Create/Get/Update/Delete/ListFunctionUrlConfig(s), Create/Get/Update/Delete/ListEventSourceMappings (SQS sources are polled and invoke the function; failed batches are retried and redriven), Put/Update/Get/Delete/ListFunctionEventInvokeConfig(s), Get/Put/DeleteFunctionCodeSigningConfig, Get/PutFunctionRecursionConfig, GetRuntimeManagementConfig, GetAccountSettings, Invoke (RequestResponse, Event, DryRun) and InvokeAsync. Invoke needs an executor: `OPENSNACK_LAMBDA_EXECUTOR=local` runs python3 and node functions as plain local processes, **with no sandbox: development only, never with untrusted code**. Without it, Invoke returns a 501 ServiceException.
+- **Lambda** (REST-JSON at the real paths): CreateFunction (ZipFile or S3), GetFunction (Code.Location is a signed opensnack download URL, valid 10 minutes), Get/UpdateFunctionConfiguration, UpdateFunctionCode, DeleteFunction, ListFunctions, PublishVersion, ListVersionsByFunction, Create/Get/Update/Delete/ListAliases, AddPermission, RemovePermission, GetPolicy, TagResource, UntagResource, ListTags, Put/Get/DeleteFunctionConcurrency, Create/Get/Update/Delete/ListFunctionUrlConfig(s), Create/Get/Update/Delete/ListEventSourceMappings (SQS sources are polled and invoke the function; failed batches are retried and redriven), Put/Update/Get/Delete/ListFunctionEventInvokeConfig(s), Get/Put/DeleteFunctionCodeSigningConfig, Get/PutFunctionRecursionConfig, GetRuntimeManagementConfig, GetAccountSettings, Invoke (RequestResponse, Event, DryRun) and InvokeAsync. Invoke needs an executor; see [Lambda execution](#lambda-execution).
 - **CloudWatch Logs**: CreateLogGroup, DescribeLogGroups, DeleteLogGroup, PutRetentionPolicy, DeleteRetentionPolicy, AssociateKmsKey, DisassociateKmsKey, PutLogGroupDeletionProtection, CreateLogStream, DescribeLogStreams, DeleteLogStream, PutLogEvents, GetLogEvents, FilterLogEvents (term, JSON and space-delimited patterns), TagResource, UntagResource, ListTagsForResource, TagLogGroup, UntagLogGroup, ListTagsLogGroup, PutMetricFilter, DescribeMetricFilters, DeleteMetricFilter, TestMetricFilter, PutSubscriptionFilter, DescribeSubscriptionFilters, DeleteSubscriptionFilter. Events are stored in a separate `log_events` table; metric filters feed CloudWatch metrics
 - **CloudWatch** (RPCv2 CBOR, JSON and Query): PutMetricAlarm, PutCompositeAlarm, DescribeAlarms, DescribeAlarmsForMetric, DescribeAlarmHistory, DeleteAlarms, SetAlarmState, EnableAlarmActions, DisableAlarmActions, TagResource, UntagResource, ListTagsForResource, PutMetricData, GetMetricStatistics, GetMetricData (MetricStat queries), ListMetrics. Metric data is in memory; alarms evaluate as data arrives and publish to SNS actions
 - **Route53**: CreateHostedZone, GetHostedZone, ListHostedZones, ListHostedZonesByName, GetHostedZoneCount, UpdateHostedZoneComment, DeleteHostedZone, AssociateVPCWithHostedZone, DisassociateVPCFromHostedZone, GetDNSSEC, ChangeResourceRecordSets (atomic batches; simple, alias, weighted, latency, failover, geolocation and multivalue records), ListResourceRecordSets, GetChange, Create/Get/List/DeleteReusableDelegationSet, Create/Get/Update/Delete/ListHealthChecks, GetHealthCheckCount, ChangeTagsForResource, ListTagsForResource, ListTagsForResources
