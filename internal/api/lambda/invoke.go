@@ -28,8 +28,10 @@ import (
 // EXECUTION
 //
 // Invoke hands the function to an Executor. Function code may be untrusted,
-// so a shared deployment must run it in a sandbox, with no network but
-// opensnack. LocalExecutor (executor_local.go) is for development only.
+// so a shared deployment must run it in a sandbox: KubernetesExecutor
+// (executor_k8s.go) runs each function in its own pod, under whatever
+// RuntimeClass the cluster provides. LocalExecutor (executor_local.go) is
+// for development only.
 //
 
 // Executor runs one invocation to completion.
@@ -130,8 +132,8 @@ func maxLogBytes() int {
 	return 256 << 10
 }
 
-// executorFromEnv picks the executor from OPENSNACK_LAMBDA_EXECUTOR. Only
-// "local" exists here; anything else leaves Invoke disabled.
+// executorFromEnv picks the executor from OPENSNACK_LAMBDA_EXECUTOR:
+// "kubernetes" or, for development, "local". Unset leaves Invoke disabled.
 func executorFromEnv() Executor {
 	switch v := os.Getenv("OPENSNACK_LAMBDA_EXECUTOR"); v {
 	case "":
@@ -140,6 +142,13 @@ func executorFromEnv() Executor {
 		zap.L().Warn("OPENSNACK_LAMBDA_EXECUTOR=local: Lambda functions run as plain processes on this host, " +
 			"with no sandbox. This is for development only; never enable it where untrusted users can upload code.")
 		return &LocalExecutor{}
+	case "kubernetes":
+		e, err := KubernetesExecutorFromEnv()
+		if err != nil {
+			zap.L().Error("OPENSNACK_LAMBDA_EXECUTOR=kubernetes: bad configuration, Invoke is disabled", zap.Error(err))
+			return nil
+		}
+		return e
 	default:
 		zap.L().Error("OPENSNACK_LAMBDA_EXECUTOR: unknown executor, Invoke is disabled", zap.String("value", v))
 		return nil
