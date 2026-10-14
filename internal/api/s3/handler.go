@@ -10,15 +10,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"strings"
 
 	"opensnack/internal/awsresponses"
 	"opensnack/internal/resource"
 	"opensnack/internal/util"
-
-	"go.uber.org/zap"
 )
 
 type Handler struct {
@@ -42,331 +39,13 @@ func extractBucketKey(path string) (bucket, key string) {
 }
 
 //
-// ─── CREATE BUCKET ─────────────────────────────────────────────────────────────
-//
-
-// PUT /:bucket
-func (h *Handler) CreateBucket(w http.ResponseWriter, r *http.Request) {
-	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
-
-	// Check for query parameters that indicate different operations
-	query := r.URL.Query()
-	if _, exists := query["versioning"]; exists {
-		h.PutBucketVersioning(w, r)
-		return
-	}
-	if _, exists := query["lifecycle"]; exists {
-		h.PutBucketLifecycleConfiguration(w, r)
-		return
-	}
-	if _, exists := query["acl"]; exists {
-		h.PutBucketAcl(w, r)
-		return
-	}
-
-	// Check if exists already
-	_, err := h.Store.Get(bucket, "s3", "bucket", ns)
-	zap.L().Debug("CreateBucket: checking existence of bucket",
-		zap.String("bucket", bucket),
-		zap.String("namespace", ns),
-		zap.Error(err),
-	)
-
-	if err == nil {
-		// Already exists
-		awsresponses.WriteS3ErrorXML(
-			w,
-			http.StatusConflict,
-			"BucketAlreadyExists",
-			"Bucket already exists",
-			bucket,
-		)
-		return
-	}
-
-	// Determine if no-body mode
-	if r.ContentLength == 0 {
-		// Create resource
-		entry := BucketEntry{
-			Name:         bucket,
-			CreationDate: time.Now().UTC(),
-		}
-		buf, _ := json.Marshal(entry)
-
-		res := &resource.Resource{
-			ID:         bucket,
-			Namespace:  ns,
-			Service:    "s3",
-			Type:       "bucket",
-			Attributes: buf,
-		}
-
-		if err := h.Store.Create(res); err != nil {
-			awsresponses.WriteJSON(w, 500, err.Error())
-			return
-		}
-
-		// AWS-style empty body
-		awsresponses.WriteEmpty200(w, map[string]string{
-			"Location": "/" + bucket,
-		})
-		return
-	}
-
-	// XML mode — parse body
-	bodyBytes, _ := io.ReadAll(r.Body)
-	var createCfg struct {
-		XMLName            xml.Name `xml:"CreateBucketConfiguration"`
-		LocationConstraint string   `xml:"LocationConstraint"`
-	}
-	_ = xml.Unmarshal(bodyBytes, &createCfg)
-
-	region := createCfg.LocationConstraint
-	if region == "" {
-		region = "us-east-1"
-	}
-
-	entry := BucketEntry{
-		Name:         bucket,
-		CreationDate: time.Now().UTC(),
-	}
-
-	buf, _ := json.Marshal(entry)
-
-	res := &resource.Resource{
-		ID:         bucket,
-		Namespace:  ns,
-		Service:    "s3",
-		Type:       "bucket",
-		Attributes: buf,
-	}
-
-	if err := h.Store.Create(res); err != nil {
-		awsresponses.WriteJSON(w, 500, err.Error())
-		return
-	}
-
-	resp := CreateBucketResult{
-		Location: "/" + bucket,
-	}
-
-	awsresponses.WriteXML(w, resp)
-}
-
-//
-// ─── DELETE BUCKET ─────────────────────────────────────────────────────────────
-//
-
-// DELETE /:bucket
-func (h *Handler) DeleteBucket(w http.ResponseWriter, r *http.Request) {
-	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
-
-	// Delete even if not exists — AWS behavior is idempotent
-	_ = h.Store.Delete(bucket, "s3", "bucket", ns)
-
-	awsresponses.WriteEmpty204(w)
-}
-
-//
-// ─── LIST BUCKETS ──────────────────────────────────────────────────────────────
-//
-
-// GET /
-func (h *Handler) ListBuckets(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-
-	items, err := h.Store.List("s3", "bucket", ns)
-	if err != nil {
-		awsresponses.WriteJSON(w, 500, err.Error())
-	}
-
-	resp := ListAllMyBucketsResult{
-		Owner: &Owner{
-			ID:          "FAKEOWNER",
-			DisplayName: "local-snack",
-		},
-	}
-
-	for _, item := range items {
-		var b BucketEntry
-		json.Unmarshal(item.Attributes, &b)
-		resp.Buckets = append(resp.Buckets, b)
-	}
-
-	awsresponses.WriteXML(w, resp)
-}
-
-//
-// ─── HEAD BUCKET ───────────────────────────────────────────────────────────────
-//
-
-// HEAD /:bucket
-func (h *Handler) HeadBucket(w http.ResponseWriter, r *http.Request) {
-	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
-
-	zap.L().Debug("HeadBucket: checking existence of bucket",
-		zap.String("bucket", bucket),
-		zap.String("namespace", ns),
-	)
-
-	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
-
-	if err != nil {
-		// Any error == bucket does not exist
-		awsresponses.WriteS3ErrorXML(
-			w,
-			http.StatusNotFound,
-			"NoSuchBucket",
-			"The specified bucket does not exist",
-			bucket,
-		)
-		return
-	}
-
-	if res == nil {
-		// Defensive: nil record should be treated as missing
-		awsresponses.WriteS3ErrorXML(
-			w,
-			http.StatusNotFound,
-			"NoSuchBucket",
-			"The specified bucket does not exist",
-			bucket,
-		)
-		return
-	}
-
-	// Bucket exists
-	awsresponses.WriteEmpty200(w, nil)
-}
-
-//
-// ─── GET BUCKET LOCATION ───────────────────────────────────────────────────────
-//
-
-// GET /:bucket?location
-func (h *Handler) GetBucketLocation(w http.ResponseWriter, r *http.Request) {
-	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
-
-	_, err := h.Store.Get(bucket, "s3", "bucket", ns)
-	if err != nil {
-		awsresponses.WriteS3ErrorXML(
-			w,
-			http.StatusNotFound,
-			"NoSuchBucket",
-			"The specified bucket does not exist",
-			bucket,
-		)
-	}
-
-	// AWS returns empty string for us-east-1
-	resp := LocationConstraint{
-		Region: "",
-	}
-
-	awsresponses.WriteXML(w, resp)
-}
-
-//
-// ─── PUT BUCKET VERSIONING ─────────────────────────────────────────────────────
-//
-
-// PUT /:bucket?versioning
-func (h *Handler) PutBucketVersioning(w http.ResponseWriter, r *http.Request) {
-	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
-
-	// Check bucket exists
-	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
-	if err != nil {
-		awsresponses.WriteS3ErrorXML(
-			w,
-			http.StatusNotFound,
-			"NoSuchBucket",
-			"The specified bucket does not exist",
-			bucket,
-		)
-		return
-	}
-
-	// Parse versioning configuration from XML body
-	bodyBytes, _ := io.ReadAll(r.Body)
-	var versioningCfg struct {
-		XMLName xml.Name `xml:"VersioningConfiguration"`
-		Status  string   `xml:"Status"`
-	}
-	_ = xml.Unmarshal(bodyBytes, &versioningCfg)
-
-	// Update bucket attributes
-	attr := make(map[string]any)
-	if len(res.Attributes) > 0 {
-		json.Unmarshal(res.Attributes, &attr)
-	}
-	attr["versioning"] = versioningCfg.Status
-
-	buf, _ := json.Marshal(attr)
-	res.Attributes = buf
-	if err := h.Store.Update(res); err != nil {
-		awsresponses.WriteJSON(w, 500, err.Error())
-		return
-	}
-
-	awsresponses.WriteEmpty200(w, nil)
-}
-
-//
-// ─── GET BUCKET VERSIONING ────────────────────────────────────────────────────
-//
-
-// GET /:bucket?versioning
-func (h *Handler) GetBucketVersioning(w http.ResponseWriter, r *http.Request) {
-	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
-
-	// Check bucket exists
-	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
-	if err != nil {
-		awsresponses.WriteS3ErrorXML(
-			w,
-			http.StatusNotFound,
-			"NoSuchBucket",
-			"The specified bucket does not exist",
-			bucket,
-		)
-		return
-	}
-
-	attr := make(map[string]any)
-	if len(res.Attributes) > 0 {
-		json.Unmarshal(res.Attributes, &attr)
-	}
-
-	status, _ := attr["versioning"].(string)
-	if status == "" {
-		status = "Suspended" // Default
-	}
-
-	resp := struct {
-		XMLName xml.Name `xml:"VersioningConfiguration"`
-		Status  string   `xml:"Status"`
-	}{
-		Status: status,
-	}
-
-	awsresponses.WriteXML(w, resp)
-}
-
-//
 // ─── PUT BUCKET LIFECYCLE CONFIGURATION ────────────────────────────────────────
 //
 
 // PUT /:bucket?lifecycle
 func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http.Request) {
 	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
+	ns := util.GlobalNamespace(r)
 
 	// Check bucket exists
 	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
@@ -385,6 +64,7 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		awsresponses.WriteS3ErrorXML(w, 400, "MalformedXML", "Failed to read request body", "")
+		return
 	}
 
 	// Handle empty body - delete lifecycle configuration
@@ -397,7 +77,7 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 		buf, _ := json.Marshal(attr)
 		res.Attributes = buf
 		if err := h.Store.Update(res); err != nil {
-			awsresponses.WriteJSON(w, 500, err.Error())
+			writeS3Error(w, 500, "InternalError", err.Error(), "")
 			return
 		}
 		awsresponses.WriteEmpty200(w, nil)
@@ -417,6 +97,7 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 	}
 	if err := xml.Unmarshal(bodyBytes, &lifecycleCfg); err != nil {
 		awsresponses.WriteS3ErrorXML(w, 400, "MalformedXML", "The XML you provided was not well-formed", "")
+		return
 	}
 
 	// Handle empty rules - delete lifecycle configuration
@@ -429,7 +110,7 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 		buf, _ := json.Marshal(attr)
 		res.Attributes = buf
 		if err := h.Store.Update(res); err != nil {
-			awsresponses.WriteJSON(w, 500, err.Error())
+			writeS3Error(w, 500, "InternalError", err.Error(), "")
 			return
 		}
 		awsresponses.WriteEmpty200(w, nil)
@@ -464,7 +145,8 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 	buf, _ := json.Marshal(attr)
 	res.Attributes = buf
 	if err := h.Store.Update(res); err != nil {
-		awsresponses.WriteJSON(w, 500, err.Error())
+		writeS3Error(w, 500, "InternalError", err.Error(), "")
+		return
 	}
 
 	awsresponses.WriteEmpty200(w, nil)
@@ -477,7 +159,7 @@ func (h *Handler) PutBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 // GET /:bucket?lifecycle
 func (h *Handler) GetBucketLifecycleConfiguration(w http.ResponseWriter, r *http.Request) {
 	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
+	ns := util.GlobalNamespace(r)
 
 	// Check bucket exists
 	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
@@ -516,6 +198,7 @@ func (h *Handler) GetBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 			"The lifecycle configuration does not exist",
 			bucket,
 		)
+		return
 	}
 
 	// Convert stored lifecycle config back to XML
@@ -529,6 +212,7 @@ func (h *Handler) GetBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 			Rules: []LifecycleRule{},
 		}
 		awsresponses.WriteXML(w, resp)
+		return
 	}
 
 	rulesData, ok := lifecycleMap["rules"].([]any)
@@ -602,7 +286,7 @@ func (h *Handler) GetBucketLifecycleConfiguration(w http.ResponseWriter, r *http
 // PUT /:bucket?acl
 func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
+	ns := util.GlobalNamespace(r)
 
 	// Check bucket exists
 	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
@@ -614,6 +298,7 @@ func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 			"The specified bucket does not exist",
 			bucket,
 		)
+		return
 	}
 
 	// Parse ACL from x-amz-acl header first (simpler, used by Terraform)
@@ -662,7 +347,8 @@ func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 	buf, _ := json.Marshal(attr)
 	res.Attributes = buf
 	if err := h.Store.Update(res); err != nil {
-		awsresponses.WriteJSON(w, 500, err.Error())
+		writeS3Error(w, 500, "InternalError", err.Error(), "")
+		return
 	}
 
 	awsresponses.WriteEmpty200(w, nil)
@@ -675,35 +361,26 @@ func (h *Handler) PutBucketAcl(w http.ResponseWriter, r *http.Request) {
 // PUT /:bucket?policy
 func (h *Handler) PutBucketPolicy(w http.ResponseWriter, r *http.Request) {
 	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
+	ns := util.GlobalNamespace(r)
 
 	// Check bucket exists
 	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
 	if err != nil {
-		awsresponses.WriteJSON(w, http.StatusNotFound, map[string]any{
-			"Code":    "NoSuchBucket",
-			"Message": "The specified bucket does not exist",
-		})
+		writeS3Error(w, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist", bucket)
 		return
 	}
 
 	// Read policy from body
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		awsresponses.WriteJSON(w, http.StatusBadRequest, map[string]any{
-			"Code":    "MalformedPolicy",
-			"Message": "Failed to read request body",
-		})
+		writeS3Error(w, http.StatusBadRequest, "MalformedPolicy", "Failed to read request body", bucket)
 		return
 	}
 
 	// Validate JSON (policy is JSON, not XML)
 	var policyJSON map[string]any
 	if err := json.Unmarshal(bodyBytes, &policyJSON); err != nil {
-		awsresponses.WriteJSON(w, http.StatusBadRequest, map[string]any{
-			"Code":    "MalformedPolicy",
-			"Message": "Policy is not valid JSON: " + err.Error(),
-		})
+		writeS3Error(w, http.StatusBadRequest, "MalformedPolicy", "Policies must be valid JSON and the first byte must be '{'", bucket)
 		return
 	}
 
@@ -717,7 +394,7 @@ func (h *Handler) PutBucketPolicy(w http.ResponseWriter, r *http.Request) {
 	buf, _ := json.Marshal(attr)
 	res.Attributes = buf
 	if err := h.Store.Update(res); err != nil {
-		awsresponses.WriteJSON(w, 500, err.Error())
+		writeS3Error(w, 500, "InternalError", err.Error(), "")
 		return
 	}
 
@@ -731,7 +408,7 @@ func (h *Handler) PutBucketPolicy(w http.ResponseWriter, r *http.Request) {
 // GET /:bucket?policy
 func (h *Handler) GetBucketPolicy(w http.ResponseWriter, r *http.Request) {
 	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
+	ns := util.GlobalNamespace(r)
 
 	// Check bucket exists
 	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
@@ -776,7 +453,7 @@ func (h *Handler) GetBucketPolicy(w http.ResponseWriter, r *http.Request) {
 // GET /:bucket?acl
 func (h *Handler) GetBucketAcl(w http.ResponseWriter, r *http.Request) {
 	bucket, _ := extractBucketKey(r.URL.Path)
-	ns := util.NamespaceFromHeader(r)
+	ns := util.GlobalNamespace(r)
 
 	// Check bucket exists
 	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
