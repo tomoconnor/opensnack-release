@@ -81,6 +81,7 @@ type sandbox struct {
 	ip         string // when set, requests must come from this address
 	registered bool   // has called /next or /init
 	waiting    chan *call
+	waitCancel chan struct{}
 	current    *call
 	lastUsed   time.Time
 	dead       bool
@@ -88,7 +89,12 @@ type sandbox struct {
 	gone       chan struct{}
 	initLogs   *cappedBuffer
 	maxRSSKB   int
+	requests   int // Runtime API requests in progress
 }
+
+// maxSandboxRequests bounds a sandbox's Runtime API requests in progress,
+// so function code can't tie up the listener with connections.
+const maxSandboxRequests = 8
 
 func (sb *sandbox) token() string { return sb.id + "." + sb.secret }
 
@@ -215,6 +221,12 @@ func (d *dispatcher) next(done <-chan struct{}, sb *sandbox) (*call, error) {
 		d.mu.Unlock()
 		return nil, errors.New("an invocation is already in progress")
 	}
+	// A new /next replaces one already waiting: the runtime only sends
+	// another when it has given up on the first (a dropped connection).
+	if sb.waiting != nil {
+		close(sb.waitCancel)
+		sb.waiting = nil
+	}
 	sb.registered = true
 	sb.lastUsed = d.now()
 	if q := d.pending[sb.key]; len(q) > 0 && !sb.retiring {
@@ -224,8 +236,8 @@ func (d *dispatcher) next(done <-chan struct{}, sb *sandbox) (*call, error) {
 		d.mu.Unlock()
 		return c, nil
 	}
-	ch := make(chan *call, 1)
-	sb.waiting = ch
+	ch, cancel := make(chan *call, 1), make(chan struct{})
+	sb.waiting, sb.waitCancel = ch, cancel
 	d.mu.Unlock()
 
 	select {
@@ -238,6 +250,7 @@ func (d *dispatcher) next(done <-chan struct{}, sb *sandbox) (*call, error) {
 		d.start(sb, c)
 		return c, nil
 	case <-done:
+	case <-cancel:
 	case <-sb.gone:
 	}
 	d.mu.Lock()
@@ -460,7 +473,8 @@ func (d *dispatcher) reap(now time.Time, idleTTL, maxLife time.Duration) {
 }
 
 // keyStats counts what serves key: invocations waiting for a sandbox,
-// sandboxes idle in /next, and sandboxes not yet started.
+// sandboxes free for one (idle in /next, or between invocations and about
+// to ask for the next), and sandboxes not yet started.
 func (d *dispatcher) keyStats(key string) (pending, idle, starting int) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -472,11 +486,25 @@ func (d *dispatcher) keyStats(key string) (pending, idle, starting int) {
 		switch {
 		case !sb.registered:
 			starting++
-		case sb.idle():
+		case sb.current == nil:
 			idle++
 		}
 	}
 	return
+}
+
+// waiting returns, for each function version with invocations queued, the
+// oldest of them.
+func (d *dispatcher) waiting() map[string]*Invocation {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := map[string]*Invocation{}
+	for key, q := range d.pending {
+		if len(q) > 0 {
+			out[key] = q[0].inv
+		}
+	}
+	return out
 }
 
 // snapshot lists the live sandboxes.
@@ -506,6 +534,19 @@ func (d *dispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		runtimeError(w, http.StatusForbidden, "AccessDenied", "Unknown or invalid runtime token.")
 		return
 	}
+	d.mu.Lock()
+	if sb.requests >= maxSandboxRequests {
+		d.mu.Unlock()
+		runtimeError(w, http.StatusTooManyRequests, "TooManyRequests", "Too many runtime API requests in progress.")
+		return
+	}
+	sb.requests++
+	d.mu.Unlock()
+	defer func() {
+		d.mu.Lock()
+		sb.requests--
+		d.mu.Unlock()
+	}()
 	path := strings.TrimPrefix(r.URL.Path, runtimePrefix)
 	if path == r.URL.Path {
 		runtimeError(w, http.StatusNotFound, "NotFound", "Unknown runtime API path.")

@@ -808,3 +808,44 @@ func createTestFunction(t *testing.T, h *Handler, name string) {
 		t.Fatalf("create function: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// Back-to-back invocations reuse the one pod, even when the next arrives
+// before the pod has asked for it.
+func TestK8sBackToBackReuse(t *testing.T) {
+	h := newHarness(t)
+	for i := 0; i < 20; i++ {
+		if res := h.invoke(testInvocation("busy", `{"echo":1}`)); res.FunctionError != "" {
+			t.Fatalf("invoke %d: %s", i, res.Payload)
+		}
+	}
+	if n := h.podCount(); n != 1 {
+		t.Fatalf("%d pods for back-to-back invocations, want 1", n)
+	}
+}
+
+// A pod that dies between invocations doesn't strand the next one.
+func TestK8sRescaleAfterDeath(t *testing.T) {
+	h := newHarness(t)
+	h.invoke(testInvocation("fragile", `{"echo":1}`))
+	waitFor(t, func() bool { return idleCount(h.e.d) == 1 })
+	// Kill the pod's runtime without the dispatcher noticing yet: it looks
+	// free, so the next invocation queues for it.
+	h.mu.Lock()
+	name := h.created[0].Metadata.Name
+	h.mu.Unlock()
+	sb := h.e.knownPods()[name]
+	h.e.d.mu.Lock()
+	close(sb.waitCancel)
+	sb.waiting = nil
+	h.e.d.mu.Unlock()
+	h.pods.Update(name, func(p *kube.Pod) {
+		p.Status.ContainerStatuses = []kube.ContainerStatus{{State: kube.ContainerState{Terminated: &kube.ContainerStateTerminated{ExitCode: 1}}}}
+	})
+	done := make(chan *InvocationResult)
+	go func() { done <- h.invoke(testInvocation("fragile", `{"echo":"rescued"}`)) }()
+	time.Sleep(50 * time.Millisecond)
+	h.e.Poll(context.Background())
+	if res := <-done; string(res.Payload) != `"rescued"` || h.podCount() != 2 {
+		t.Fatalf("after the pod died: %s, %d pods", res.Payload, h.podCount())
+	}
+}

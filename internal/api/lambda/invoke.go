@@ -288,6 +288,10 @@ func (s *statusRecorder) WriteHeader(code int) {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the connection (to extend a
+// write deadline, say).
+func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
 func (s *statusRecorder) Write(b []byte) (int, error) {
 	if !s.wrote {
 		s.wrote = true

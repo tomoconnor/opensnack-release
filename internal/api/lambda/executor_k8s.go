@@ -453,13 +453,10 @@ func (e *KubernetesExecutor) Invoke(ctx context.Context, inv *Invocation) (*Invo
 			return nil, c.err
 		}
 	}
-	select {
-	case <-c.done:
-	case <-ctx.Done():
-		// The function carries on (its timeout still applies); the caller
-		// has gone.
-		return nil, ctx.Err()
-	}
+	// Once a sandbox has the invocation it runs to the end (its timeout
+	// still applies) even if the caller goes, and Invoke waits for it, so
+	// the invocation keeps its place under the concurrency caps.
+	<-c.done
 	if c.err != nil {
 		return nil, c.err
 	}
@@ -777,6 +774,11 @@ func (e *KubernetesExecutor) Poll(ctx context.Context) {
 		case !registered && age > e.cfg.StartTimeout:
 			e.d.remove(sb, sandboxDeath{Reason: fmt.Sprintf("the sandbox did not start within %s", e.cfg.StartTimeout)})
 		}
+	}
+	// Invocations queued for a sandbox that has since gone need another.
+	for key, inv := range e.d.waiting() {
+		family := runtimeFamily(inv.Runtime)
+		e.scale(inv, key, family, e.cfg.Images[family])
 	}
 }
 

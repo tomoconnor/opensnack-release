@@ -471,13 +471,31 @@ func (c *dpCall) lambdaProxy() {
 	ctx, cancel := context.WithTimeout(c.r.Context(), timeout)
 	defer cancel()
 	http.NewResponseController(c.w).SetWriteDeadline(time.Now().Add(timeout + 5*time.Second))
-	out, err := c.h.Invoker.InvokeLambda(ctx, LambdaInvocation{
-		Namespace: c.d.namespace,
-		Region:    c.d.region,
-		AccountID: str(c.d.api, "_accountId"),
-		Function:  functionFromURI(str(c.integ, "integrationUri")),
-		Payload:   payload,
-	})
+	// A function already running when the timeout passes carries on; the
+	// client gets its 504 now.
+	type outcome struct {
+		out []byte
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		out, err := c.h.Invoker.InvokeLambda(ctx, LambdaInvocation{
+			Namespace: c.d.namespace,
+			Region:    c.d.region,
+			AccountID: str(c.d.api, "_accountId"),
+			Function:  functionFromURI(str(c.integ, "integrationUri")),
+			Payload:   payload,
+		})
+		done <- outcome{out, err}
+	}()
+	var out []byte
+	var err error
+	select {
+	case o := <-done:
+		out, err = o.out, o.err
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
 	if err != nil {
 		zap.L().Info("apigateway: lambda proxy failed", zap.String("api", str(c.d.api, "apiId")), zap.Error(err))
 		if errors.Is(err, ErrNoInvoker) {
