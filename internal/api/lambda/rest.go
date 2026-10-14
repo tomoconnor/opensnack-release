@@ -43,6 +43,8 @@ type Handler struct {
 	Executor Executor
 	// Logs receives each invocation's log lines. Nil drops them.
 	Logs LogSink
+	// AsyncTiming paces retries of Event invocations.
+	AsyncTiming AsyncTiming
 
 	// mu serialises read-modify-write of a function and the rows hanging off
 	// it, so the provider's parallel calls (alias and permission at once,
@@ -51,10 +53,73 @@ type Handler struct {
 	// invokes tracks Event invocations still running, so tests and shutdown
 	// can wait for them.
 	invokes sync.WaitGroup
+	// concurrency caps invocations in flight; asyncQueued counts Event
+	// invocations waiting, by namespace.
+	concurrency *concurrency
+	asyncMu     sync.Mutex
+	asyncQueued map[string]int
+	asyncLimit  int
+	stop        chan struct{}
+	stopOnce    sync.Once
 }
 
 func NewHandler(store resource.Store) *Handler {
-	return &Handler{Store: store, Executor: executorFromEnv()}
+	return &Handler{
+		Store:       store,
+		Executor:    executorFromEnv(),
+		AsyncTiming: defaultAsyncTiming,
+		concurrency: newConcurrency(concurrencyFromEnv()),
+		asyncQueued: map[string]int{},
+		asyncLimit:  asyncQueueFromEnv(),
+		stop:        make(chan struct{}),
+	}
+}
+
+// Start starts the executor's background work (KubernetesExecutor's
+// Runtime API listener, pod reaper and orphan collection), if it has any.
+func (h *Handler) Start() error {
+	if s, ok := h.Executor.(interface{ Start() error }); ok {
+		return s.Start()
+	}
+	return nil
+}
+
+// Stop abandons queued Event invocations and stops the executor.
+func (h *Handler) Stop() {
+	h.stopOnce.Do(func() { close(h.stop) })
+	if s, ok := h.Executor.(interface{ Stop() }); ok {
+		s.Stop()
+	}
+}
+
+// SetCredentials gives the executor a way to mint credentials for each
+// function's execution role.
+func (h *Handler) SetCredentials(c CredentialIssuer) {
+	if s, ok := h.Executor.(interface{ SetCredentialIssuer(CredentialIssuer) }); ok {
+		s.SetCredentialIssuer(c)
+	}
+}
+
+// retirer is an executor that keeps sandboxes warm and must drop them when
+// the function changes or goes away.
+type retirer interface {
+	RetireFunction(namespace, region, function string)
+	RetireNamespace(namespace string)
+}
+
+func (h *Handler) retire(r *http.Request, function string) {
+	if rt, ok := h.Executor.(retirer); ok {
+		rt.RetireFunction(util.GlobalNamespace(r), util.Region(r), function)
+	}
+}
+
+// RetireNamespace stops every sandbox a namespace has. It is a
+// NamespaceCleaner for the inspection API.
+func (h *Handler) RetireNamespace(namespace string) error {
+	if rt, ok := h.Executor.(retirer); ok {
+		rt.RetireNamespace(namespace)
+	}
+	return nil
 }
 
 // WaitAsync blocks until every Event (async) invocation started so far has
@@ -98,6 +163,11 @@ func errFunctionNotFound(arn string) *apiError {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	var te *throttleError
+	if errors.As(err, &te) {
+		writeThrottle(w, te)
+		return
+	}
 	var e *apiError
 	if !errors.As(err, &e) {
 		e = &apiError{http.StatusInternalServerError, "ServiceException", err.Error()}

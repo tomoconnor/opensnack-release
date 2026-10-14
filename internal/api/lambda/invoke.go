@@ -14,6 +14,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,10 +28,8 @@ import (
 // EXECUTION
 //
 // Invoke hands the function to an Executor. Function code may be untrusted,
-// so a shared deployment should run it in a sandbox (a microVM or sandboxed
-// container per invocation, with no network but opensnack); such an executor
-// lives outside this package and is set on Handler.Executor. LocalExecutor (executor_local.go)
-// is for development only.
+// so a shared deployment must run it in a sandbox, with no network but
+// opensnack. LocalExecutor (executor_local.go) is for development only.
 //
 
 // Executor runs one invocation to completion.
@@ -66,9 +65,15 @@ type Invocation struct {
 	Environment  map[string]string
 	LogGroup     string
 	LogStream    string
+	// Role is the execution role, whose credentials the function gets.
+	Role string
+	// ReservedConcurrency is the function's ReservedConcurrentExecutions,
+	// nil when it has none.
+	ReservedConcurrency *int
 
-	// Code is the deployment package, a zip.
-	Code       []byte
+	// LoadCode reads the deployment package, a zip. CodeSha256 identifies
+	// it, so a warm sandbox can tell whether it still has the right code.
+	LoadCode   func() ([]byte, error)
 	CodeSha256 string
 
 	Payload []byte
@@ -87,6 +92,9 @@ type InvocationResult struct {
 	Duration time.Duration
 	// MaxMemoryMB is the peak memory use, 0 if unknown.
 	MaxMemoryMB int
+	// LogStream, when set, replaces Invocation.LogStream: a warm sandbox
+	// keeps writing to its own stream, as in Lambda.
+	LogStream string
 }
 
 // ErrUnsupportedRuntime is returned by an executor that can't run the
@@ -112,6 +120,15 @@ const (
 	maxAsyncPayload = 1 << 20
 	maxTail         = 4096
 )
+
+// maxLogBytes is OPENSNACK_LAMBDA_MAX_LOG_BYTES, the most output kept from
+// one invocation (default 256 KiB).
+func maxLogBytes() int {
+	if v, err := strconv.Atoi(os.Getenv("OPENSNACK_LAMBDA_MAX_LOG_BYTES")); err == nil && v > 0 {
+		return v
+	}
+	return 256 << 10
+}
 
 // executorFromEnv picks the executor from OPENSNACK_LAMBDA_EXECUTOR. Only
 // "local" exists here; anything else leaves Invoke disabled.
@@ -193,26 +210,32 @@ func (h *Handler) Invoke(w http.ResponseWriter, r *http.Request, name string) {
 	}
 
 	if invType == "Event" {
-		h.invokes.Add(1)
-		go func() {
-			defer h.invokes.Done()
-			if _, err := h.run(context.Background(), inv); err != nil {
-				zap.L().Warn("async lambda invocation failed", zap.String("function", inv.InvokedARN), zap.Error(err))
-			}
-		}()
+		if !h.queueAsync(inv, h.asyncPolicy(r, name)) {
+			writeError(w, throttled("ConcurrentInvocationLimitExceeded"))
+			return
+		}
 		w.Header().Set("X-Amzn-RequestId", inv.RequestID)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
 
+	// The function may run far longer than the server's write timeout.
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(inv.Timeout + 5*time.Minute))
 	res, err := h.run(r.Context(), inv)
 	if err != nil {
-		if errors.Is(err, ErrUnsupportedRuntime) {
+		var te *throttleError
+		var ae *apiError
+		switch {
+		case errors.As(err, &te), errors.As(err, &ae):
+			writeError(w, err)
+		case errors.Is(err, ErrThrottled):
+			writeError(w, throttled("ConcurrentInvocationLimitExceeded"))
+		case errors.Is(err, ErrUnsupportedRuntime):
 			writeError(w, &apiError{http.StatusBadGateway, "InvalidRuntimeException",
 				"The runtime parameter of " + inv.Runtime + " is not supported by this server's executor."})
-			return
+		default:
+			writeError(w, &apiError{http.StatusInternalServerError, "ServiceException", err.Error()})
 		}
-		writeError(w, &apiError{http.StatusInternalServerError, "ServiceException", err.Error()})
 		return
 	}
 	if res.FunctionError != "" {
@@ -300,8 +323,8 @@ func (h *Handler) prepareInvocation(r *http.Request, name string, payload []byte
 	if cfg.PackageType == "Image" {
 		return nil, &apiError{http.StatusBadGateway, "InvalidRuntimeException", "Container image functions can't be invoked on this server."}
 	}
-	code, err := ReadCode(util.GlobalNamespace(r), res.codeBlob)
-	if err != nil {
+	codeNS, codeBlob := util.GlobalNamespace(r), res.codeBlob
+	if !blobName.MatchString(codeBlob) {
 		return nil, &apiError{http.StatusInternalServerError, "ServiceException", "The function's code could not be read."}
 	}
 
@@ -335,20 +358,90 @@ func (h *Handler) prepareInvocation(r *http.Request, name string, payload []byte
 		Timeout:      time.Duration(cfg.Timeout) * time.Second,
 		Environment:  env,
 		LogGroup:     logGroup,
-		LogStream:    time.Now().UTC().Format("2006/01/02") + "/[" + cfg.Version + "]" + util.RandomHex(16),
-		Code:         code,
-		CodeSha256:   cfg.CodeSha256,
-		Payload:      payload,
+		LogStream:    newLogStream(cfg.Version),
+		Role:         cfg.Role,
+		LoadCode: func() ([]byte, error) {
+			b, err := ReadCode(codeNS, codeBlob)
+			if err != nil {
+				return nil, fmt.Errorf("the function's code could not be read: %w", err)
+			}
+			return b, nil
+		},
+		ReservedConcurrency: res.fn.Concurrency,
+		CodeSha256:          cfg.CodeSha256,
+		Payload:             payload,
 	}, nil
 }
 
+func newLogStream(version string) string {
+	return time.Now().UTC().Format("2006/01/02") + "/[" + version + "]" + util.RandomHex(16)
+}
+
+// asyncPolicy reads the function's event invoke config for the invoked
+// qualifier (falling back to the unqualified one).
+func (h *Handler) asyncPolicy(r *http.Request, name string) asyncPolicy {
+	p := asyncPolicy{MaxRetries: 2, MaxAge: 6 * time.Hour}
+	ref, err := parseFunctionName(r, name)
+	if err != nil {
+		return p
+	}
+	var cfg FunctionEventInvokeConfig
+	if !h.get(r, typeEventInvoke, policyID(ref), &cfg) {
+		ref.Qualifier = ""
+		if !h.get(r, typeEventInvoke, policyID(ref), &cfg) {
+			return p
+		}
+	}
+	if cfg.MaximumRetryAttempts != nil {
+		p.MaxRetries = *cfg.MaximumRetryAttempts
+	}
+	if cfg.MaximumEventAgeInSeconds != nil {
+		p.MaxAge = time.Duration(*cfg.MaximumEventAgeInSeconds) * time.Second
+	}
+	return p
+}
+
+// queueAsync starts an Event invocation, unless its namespace already has
+// as many waiting as it may.
+func (h *Handler) queueAsync(inv *Invocation, policy asyncPolicy) bool {
+	h.asyncMu.Lock()
+	if h.asyncQueued[inv.Namespace] >= h.asyncLimit {
+		h.asyncMu.Unlock()
+		return false
+	}
+	h.asyncQueued[inv.Namespace]++
+	h.asyncMu.Unlock()
+	h.invokes.Add(1)
+	go func() {
+		defer h.invokes.Done()
+		defer func() {
+			h.asyncMu.Lock()
+			if h.asyncQueued[inv.Namespace]--; h.asyncQueued[inv.Namespace] <= 0 {
+				delete(h.asyncQueued, inv.Namespace)
+			}
+			h.asyncMu.Unlock()
+		}()
+		h.runAsync(inv, policy, h.stop)
+	}()
+	return true
+}
+
 // run executes the invocation and ships its logs, framed by the START, END
-// and REPORT lines Lambda writes.
+// and REPORT lines Lambda writes. It admits the invocation against the
+// concurrency caps first.
 func (h *Handler) run(ctx context.Context, inv *Invocation) (*InvocationResult, error) {
+	release, te := h.concurrency.acquire(inv)
+	if te != nil {
+		return nil, te
+	}
+	defer release()
 	start := time.Now()
 	res, err := h.Executor.Invoke(ctx, inv)
 	if err != nil {
 		return nil, err
+	}
+	if res.LogStream != "" {
+		inv.LogStream = res.LogStream
 	}
 	if len(res.Payload) > maxSyncPayload {
 		res.FunctionError = "Unhandled"

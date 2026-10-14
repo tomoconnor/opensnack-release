@@ -15,4 +15,10 @@ func configureProcess(cmd *exec.Cmd) {
 	cmd.WaitDelay = 2 * time.Second
 }
 
+func killProcess(cmd *exec.Cmd) {
+	if cmd.Process != nil {
+		cmd.Process.Kill()
+	}
+}
+
 func maxMemoryMB(*exec.Cmd) int { return 0 }

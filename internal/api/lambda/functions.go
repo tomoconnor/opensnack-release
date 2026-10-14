@@ -436,6 +436,7 @@ func (h *Handler) UpdateFunctionConfiguration(w http.ResponseWriter, r *http.Req
 		writeError(w, err)
 		return
 	}
+	h.retire(r, ref.Name)
 	writeJSON(w, http.StatusOK, fn.Config)
 }
 
@@ -523,6 +524,7 @@ func (h *Handler) UpdateFunctionCode(w http.ResponseWriter, r *http.Request, nam
 	if oldBlob != fn.CodeBlob && !h.blobInUse(r, ref.Name, oldBlob) {
 		removeCode(r, oldBlob)
 	}
+	h.retire(r, ref.Name)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -575,6 +577,7 @@ func (h *Handler) DeleteFunction(w http.ResponseWriter, r *http.Request, name st
 		if !h.blobInUse(r, ref.Name, v.CodeBlob) {
 			removeCode(r, v.CodeBlob)
 		}
+		h.retire(r, ref.Name)
 		noContent(w)
 		return
 	}
@@ -596,6 +599,7 @@ func (h *Handler) DeleteFunction(w http.ResponseWriter, r *http.Request, name st
 	for blob := range blobs {
 		removeCode(r, blob)
 	}
+	h.retire(r, ref.Name)
 	noContent(w)
 }
 
