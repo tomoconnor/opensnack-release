@@ -80,7 +80,7 @@ OpenSnack answers on the real AWS host names (`{service}.{region}.amazonaws.com`
 
 ## Resource cycle harness
 
-`go run ./cmd/tfcycle opentofu/cycle/cases/*` checks that each resource applies, plans clean, updates in place, imports and destroys cleanly. See [opentofu/cycle/README.md](opentofu/cycle/README.md).
+`go run ./cmd/tfcycle opentofu/cycle/cases/*` checks that each resource applies, plans clean, updates in place, imports and destroys cleanly. CI doesn't run it, because the full set takes the best part of an hour; run it locally before merging a change to a service. See [opentofu/cycle/README.md](opentofu/cycle/README.md).
 
 ## Docker Compose
 
@@ -106,7 +106,7 @@ Load tests live in [k6/README.md](k6/README.md).
 
 ## Supported APIs (current)
 
-The following services and operations are implemented. Each Terraform resource built on them has a case in [opentofu/cycle/cases](opentofu/cycle/cases) that the CI runs through apply, a clean plan, an in-place update, import and destroy.
+The following services and operations are implemented. Each Terraform resource built on them has a case in [opentofu/cycle/cases](opentofu/cycle/cases) that `cmd/tfcycle` runs through apply, a clean plan, an in-place update, import and destroy.
 
 - **S3**: CreateBucket, HeadBucket, ListBuckets, GetBucketLocation, DeleteBucket; Put/GetBucketVersioning; Put/Get/DeleteBucketTagging; Put/Get/DeleteBucketEncryption; Put/Get/DeletePublicAccessBlock; Put/Get/DeleteBucketOwnershipControls; Put/Get/DeleteBucketCors; Put/Get/DeleteBucketWebsite; Put/Get/DeleteBucketPolicy, GetBucketPolicyStatus; Put/GetBucketAcl; Put/Get/DeleteBucketLifecycle; PutObject (conditional, with tagging), CopyObject, GetObject, HeadObject, DeleteObject, DeleteObjects, Put/Get/DeleteObjectTagging; ListObjects, ListObjectsV2, ListObjectVersions, with real version storage, delete markers and suspended (null) versions
 - **DynamoDB**: CreateTable (GSIs, LSIs), DescribeTable, ListTables, UpdateTable (GSI create/update/delete, billing mode, streams, SSE), DeleteTable, DescribeTimeToLive, UpdateTimeToLive, DescribeContinuousBackups, UpdateContinuousBackups, TagResource, UntagResource, ListTagsOfResource, PutItem, GetItem, UpdateItem, DeleteItem (condition, update, projection and filter expressions), Query (tables and indexes), Scan, BatchWriteItem, BatchGetItem, TransactWriteItems, TransactGetItems

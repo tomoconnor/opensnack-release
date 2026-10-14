@@ -1,6 +1,6 @@
 # Resource cycle cases
 
-Each directory under `cases/` is one check that a resource type is done, in the sense of OPENSNACK_GAPS.md:
+Each directory under `cases/` is one check that a resource type works the way Terraform expects:
 
 1. `apply` succeeds.
 2. A second `plan` shows no changes.
@@ -13,6 +13,12 @@ Run them against a dev-mode opensnack that treats `localtest.me` as an AWS domai
 ```bash
 OPENSNACK_HOST_SUFFIXES=localtest.me go run ./cmd/opensnack &
 go run ./cmd/tfcycle opentofu/cycle/cases/*
+```
+
+CI doesn't run these: the full set takes the best part of an hour. Run it before merging a change to a service, or just the cases you touched:
+
+```bash
+go run ./cmd/tfcycle opentofu/cycle/cases/sqs_* opentofu/cycle/cases/sns_*
 ```
 
 You need OpenTofu 1.6 or later, or Terraform 1.5 or later (for `import` blocks). Pass `-tofu` to choose the binary and `-provider` to pin the AWS provider version.
