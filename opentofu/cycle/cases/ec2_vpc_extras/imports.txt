@@ -1,0 +1,4 @@
+aws_security_group_rule.svc_https {security_group_id}_{type}_{protocol}_{from_port}_{to_port}_10.50.0.0/16
+aws_security_group_rule.svc_out {security_group_id}_{type}_{protocol}_{from_port}_{to_port}_0.0.0.0/0
+aws_network_acl_rule.b_https {network_acl_id}:{rule_number}:{protocol}:{egress}
+aws_network_acl_rule.b_icmp {network_acl_id}:{rule_number}:{protocol}:{egress}

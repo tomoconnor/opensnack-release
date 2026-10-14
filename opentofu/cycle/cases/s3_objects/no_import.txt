@@ -1,0 +1,3 @@
+aws_s3_object_copy.c
+aws_s3_object.o
+aws_s3_bucket.b

@@ -4,57 +4,83 @@
 
 package dynamodb
 
-// Tag represents a DynamoDB tag
 type Tag struct {
 	Key   string `json:"Key"`
 	Value string `json:"Value"`
 }
 
-// AttributeDefinition defines an attribute for the table
 type AttributeDefinition struct {
 	AttributeName string `json:"AttributeName"`
-	AttributeType string `json:"AttributeType"` // S, N, B
+	AttributeType string `json:"AttributeType"`
 }
 
-// KeySchemaElement defines key schema
 type KeySchemaElement struct {
 	AttributeName string `json:"AttributeName"`
-	KeyType       string `json:"KeyType"` // HASH, RANGE
+	KeyType       string `json:"KeyType"`
 }
 
-// Projection defines what attributes are projected
 type Projection struct {
-	ProjectionType   string   `json:"ProjectionType"` // ALL, KEYS_ONLY, INCLUDE
+	ProjectionType   string   `json:"ProjectionType,omitempty"`
 	NonKeyAttributes []string `json:"NonKeyAttributes,omitempty"`
 }
 
-// ProvisionedThroughput defines throughput settings
 type ProvisionedThroughput struct {
-	ReadCapacityUnits      int64   `json:"ReadCapacityUnits"`
-	WriteCapacityUnits     int64   `json:"WriteCapacityUnits"`
-	NumberOfDecreasesToday int64   `json:"NumberOfDecreasesToday"`
-	LastIncreaseDateTime   float64 `json:"LastIncreaseDateTime,omitempty"`
-	LastDecreaseDateTime   float64 `json:"LastDecreaseDateTime,omitempty"`
+	ReadCapacityUnits  int64 `json:"ReadCapacityUnits"`
+	WriteCapacityUnits int64 `json:"WriteCapacityUnits"`
 }
 
-// ProvisionedThroughputDescription describes throughput
 type ProvisionedThroughputDescription struct {
-	ReadCapacityUnits      int64   `json:"ReadCapacityUnits"`
-	WriteCapacityUnits     int64   `json:"WriteCapacityUnits"`
-	NumberOfDecreasesToday int64   `json:"NumberOfDecreasesToday"`
-	LastIncreaseDateTime   float64 `json:"LastIncreaseDateTime,omitempty"`
-	LastDecreaseDateTime   float64 `json:"LastDecreaseDateTime,omitempty"`
+	NumberOfDecreasesToday int64    `json:"NumberOfDecreasesToday"`
+	ReadCapacityUnits      int64    `json:"ReadCapacityUnits"`
+	WriteCapacityUnits     int64    `json:"WriteCapacityUnits"`
+	LastIncreaseDateTime   *float64 `json:"LastIncreaseDateTime,omitempty"`
+	LastDecreaseDateTime   *float64 `json:"LastDecreaseDateTime,omitempty"`
 }
 
-// GlobalSecondaryIndex defines a GSI
+type OnDemandThroughput struct {
+	MaxReadRequestUnits  *int64 `json:"MaxReadRequestUnits,omitempty"`
+	MaxWriteRequestUnits *int64 `json:"MaxWriteRequestUnits,omitempty"`
+}
+
+type WarmThroughput struct {
+	ReadUnitsPerSecond  *int64 `json:"ReadUnitsPerSecond,omitempty"`
+	WriteUnitsPerSecond *int64 `json:"WriteUnitsPerSecond,omitempty"`
+}
+
+type WarmThroughputDescription struct {
+	ReadUnitsPerSecond  int64  `json:"ReadUnitsPerSecond"`
+	WriteUnitsPerSecond int64  `json:"WriteUnitsPerSecond"`
+	Status              string `json:"Status"`
+}
+
 type GlobalSecondaryIndex struct {
 	IndexName             string                 `json:"IndexName"`
 	KeySchema             []KeySchemaElement     `json:"KeySchema"`
 	Projection            Projection             `json:"Projection"`
 	ProvisionedThroughput *ProvisionedThroughput `json:"ProvisionedThroughput,omitempty"`
+	OnDemandThroughput    *OnDemandThroughput    `json:"OnDemandThroughput,omitempty"`
+	WarmThroughput        *WarmThroughput        `json:"WarmThroughput,omitempty"`
 }
 
-// GlobalSecondaryIndexDescription describes a GSI
+type LocalSecondaryIndex struct {
+	IndexName  string             `json:"IndexName"`
+	KeySchema  []KeySchemaElement `json:"KeySchema"`
+	Projection Projection         `json:"Projection"`
+}
+
+type GlobalSecondaryIndexUpdate struct {
+	Create *GlobalSecondaryIndex `json:"Create,omitempty"`
+	Update *struct {
+		IndexName             string                 `json:"IndexName"`
+		ProvisionedThroughput *ProvisionedThroughput `json:"ProvisionedThroughput,omitempty"`
+		OnDemandThroughput    *OnDemandThroughput    `json:"OnDemandThroughput,omitempty"`
+		WarmThroughput        *WarmThroughput        `json:"WarmThroughput,omitempty"`
+	} `json:"Update,omitempty"`
+	Delete *struct {
+		IndexName string `json:"IndexName"`
+	} `json:"Delete,omitempty"`
+}
+
 type GlobalSecondaryIndexDescription struct {
 	IndexName             string                            `json:"IndexName"`
 	KeySchema             []KeySchemaElement                `json:"KeySchema"`
@@ -62,18 +88,12 @@ type GlobalSecondaryIndexDescription struct {
 	IndexStatus           string                            `json:"IndexStatus"`
 	IndexArn              string                            `json:"IndexArn"`
 	ProvisionedThroughput *ProvisionedThroughputDescription `json:"ProvisionedThroughput,omitempty"`
+	OnDemandThroughput    *OnDemandThroughput               `json:"OnDemandThroughput,omitempty"`
+	WarmThroughput        *WarmThroughputDescription        `json:"WarmThroughput,omitempty"`
 	ItemCount             int64                             `json:"ItemCount"`
 	IndexSizeBytes        int64                             `json:"IndexSizeBytes"`
 }
 
-// LocalSecondaryIndex defines an LSI
-type LocalSecondaryIndex struct {
-	IndexName  string             `json:"IndexName"`
-	KeySchema  []KeySchemaElement `json:"KeySchema"`
-	Projection Projection         `json:"Projection"`
-}
-
-// LocalSecondaryIndexDescription describes an LSI
 type LocalSecondaryIndexDescription struct {
 	IndexName      string             `json:"IndexName"`
 	KeySchema      []KeySchemaElement `json:"KeySchema"`
@@ -83,55 +103,56 @@ type LocalSecondaryIndexDescription struct {
 	IndexSizeBytes int64              `json:"IndexSizeBytes"`
 }
 
-// StreamSpecification defines stream settings
 type StreamSpecification struct {
 	StreamEnabled  bool   `json:"StreamEnabled"`
-	StreamViewType string `json:"StreamViewType,omitempty"` // KEYS_ONLY, NEW_IMAGE, OLD_IMAGE, NEW_AND_OLD_IMAGES
+	StreamViewType string `json:"StreamViewType,omitempty"`
 }
 
-// SSESpecification defines server-side encryption settings
 type SSESpecification struct {
-	Enabled        bool   `json:"Enabled"`
-	SSEType        string `json:"SSEType,omitempty"` // AES256, KMS
+	Enabled        *bool  `json:"Enabled,omitempty"`
+	SSEType        string `json:"SSEType,omitempty"`
 	KMSMasterKeyId string `json:"KMSMasterKeyId,omitempty"`
 }
 
-// SSEDescription describes SSE status
 type SSEDescription struct {
 	Status          string `json:"Status"`
 	SSEType         string `json:"SSEType,omitempty"`
 	KMSMasterKeyArn string `json:"KMSMasterKeyArn,omitempty"`
 }
 
-// BillingModeSummary describes billing mode
 type BillingModeSummary struct {
-	BillingMode                       string  `json:"BillingMode"`
-	LastUpdateToPayPerRequestDateTime float64 `json:"LastUpdateToPayPerRequestDateTime,omitempty"`
+	BillingMode                       string   `json:"BillingMode"`
+	LastUpdateToPayPerRequestDateTime *float64 `json:"LastUpdateToPayPerRequestDateTime,omitempty"`
 }
 
-// TableDescription describes a DynamoDB table
+type TableClassSummary struct {
+	TableClass string `json:"TableClass"`
+}
+
 type TableDescription struct {
-	TableName                 string                            `json:"TableName"`
-	TableArn                  string                            `json:"TableArn"`
-	TableId                   string                            `json:"TableId"`
-	TableStatus               string                            `json:"TableStatus"`
-	CreationDateTime          float64                           `json:"CreationDateTime"`
 	AttributeDefinitions      []AttributeDefinition             `json:"AttributeDefinitions"`
-	KeySchema                 []KeySchemaElement                `json:"KeySchema"`
-	ProvisionedThroughput     *ProvisionedThroughputDescription `json:"ProvisionedThroughput,omitempty"`
 	BillingModeSummary        *BillingModeSummary               `json:"BillingModeSummary,omitempty"`
+	CreationDateTime          float64                           `json:"CreationDateTime"`
+	DeletionProtectionEnabled bool                              `json:"DeletionProtectionEnabled"`
 	GlobalSecondaryIndexes    []GlobalSecondaryIndexDescription `json:"GlobalSecondaryIndexes,omitempty"`
-	LocalSecondaryIndexes     []LocalSecondaryIndexDescription  `json:"LocalSecondaryIndexes,omitempty"`
-	StreamSpecification       *StreamSpecification              `json:"StreamSpecification,omitempty"`
+	ItemCount                 int64                             `json:"ItemCount"`
+	KeySchema                 []KeySchemaElement                `json:"KeySchema"`
 	LatestStreamArn           string                            `json:"LatestStreamArn,omitempty"`
 	LatestStreamLabel         string                            `json:"LatestStreamLabel,omitempty"`
+	LocalSecondaryIndexes     []LocalSecondaryIndexDescription  `json:"LocalSecondaryIndexes,omitempty"`
+	OnDemandThroughput        *OnDemandThroughput               `json:"OnDemandThroughput,omitempty"`
+	ProvisionedThroughput     *ProvisionedThroughputDescription `json:"ProvisionedThroughput,omitempty"`
 	SSEDescription            *SSEDescription                   `json:"SSEDescription,omitempty"`
-	ItemCount                 int64                             `json:"ItemCount"`
+	StreamSpecification       *StreamSpecification              `json:"StreamSpecification,omitempty"`
+	TableArn                  string                            `json:"TableArn"`
+	TableClassSummary         *TableClassSummary                `json:"TableClassSummary,omitempty"`
+	TableId                   string                            `json:"TableId"`
+	TableName                 string                            `json:"TableName"`
 	TableSizeBytes            int64                             `json:"TableSizeBytes"`
-	DeletionProtectionEnabled bool                              `json:"DeletionProtectionEnabled,omitempty"`
+	TableStatus               string                            `json:"TableStatus"`
+	WarmThroughput            *WarmThroughputDescription        `json:"WarmThroughput,omitempty"`
 }
 
-// CreateTableInput is the input for CreateTable
 type CreateTableInput struct {
 	TableName                 string                 `json:"TableName"`
 	AttributeDefinitions      []AttributeDefinition  `json:"AttributeDefinitions"`
@@ -142,89 +163,46 @@ type CreateTableInput struct {
 	LocalSecondaryIndexes     []LocalSecondaryIndex  `json:"LocalSecondaryIndexes,omitempty"`
 	StreamSpecification       *StreamSpecification   `json:"StreamSpecification,omitempty"`
 	SSESpecification          *SSESpecification      `json:"SSESpecification,omitempty"`
+	TableClass                string                 `json:"TableClass,omitempty"`
+	OnDemandThroughput        *OnDemandThroughput    `json:"OnDemandThroughput,omitempty"`
+	WarmThroughput            *WarmThroughput        `json:"WarmThroughput,omitempty"`
 	Tags                      []Tag                  `json:"Tags,omitempty"`
 	DeletionProtectionEnabled bool                   `json:"DeletionProtectionEnabled,omitempty"`
 }
 
-// CreateTableOutput is the output for CreateTable
-type CreateTableOutput struct {
-	TableDescription TableDescription `json:"TableDescription"`
-}
-
-// DescribeTableOutput is the output for DescribeTable
-type DescribeTableOutput struct {
-	Table TableDescription `json:"Table"`
-}
-
-// DeleteTableOutput is the output for DeleteTable
-type DeleteTableOutput struct {
-	TableDescription TableDescription `json:"TableDescription"`
-}
-
-// ListTablesOutput is the output for ListTables
-type ListTablesOutput struct {
-	TableNames             []string `json:"TableNames"`
-	LastEvaluatedTableName string   `json:"LastEvaluatedTableName,omitempty"`
-}
-
-// UpdateTableInput is the input for UpdateTable
 type UpdateTableInput struct {
-	TableName                   string                 `json:"TableName"`
-	AttributeDefinitions        []AttributeDefinition  `json:"AttributeDefinitions,omitempty"`
-	BillingMode                 string                 `json:"BillingMode,omitempty"`
-	ProvisionedThroughput       *ProvisionedThroughput `json:"ProvisionedThroughput,omitempty"`
-	GlobalSecondaryIndexUpdates []any                  `json:"GlobalSecondaryIndexUpdates,omitempty"`
-	StreamSpecification         *StreamSpecification   `json:"StreamSpecification,omitempty"`
-	SSESpecification            *SSESpecification      `json:"SSESpecification,omitempty"`
-	DeletionProtectionEnabled   *bool                  `json:"DeletionProtectionEnabled,omitempty"`
+	TableName                   string                       `json:"TableName"`
+	AttributeDefinitions        []AttributeDefinition        `json:"AttributeDefinitions,omitempty"`
+	BillingMode                 string                       `json:"BillingMode,omitempty"`
+	ProvisionedThroughput       *ProvisionedThroughput       `json:"ProvisionedThroughput,omitempty"`
+	GlobalSecondaryIndexUpdates []GlobalSecondaryIndexUpdate `json:"GlobalSecondaryIndexUpdates,omitempty"`
+	StreamSpecification         *StreamSpecification         `json:"StreamSpecification,omitempty"`
+	SSESpecification            *SSESpecification            `json:"SSESpecification,omitempty"`
+	TableClass                  string                       `json:"TableClass,omitempty"`
+	OnDemandThroughput          *OnDemandThroughput          `json:"OnDemandThroughput,omitempty"`
+	WarmThroughput              *WarmThroughput              `json:"WarmThroughput,omitempty"`
+	DeletionProtectionEnabled   *bool                        `json:"DeletionProtectionEnabled,omitempty"`
+	ReplicaUpdates              []any                        `json:"ReplicaUpdates,omitempty"`
 }
 
-// UpdateTableOutput is the output for UpdateTable
-type UpdateTableOutput struct {
-	TableDescription TableDescription `json:"TableDescription"`
-}
-
-// TimeToLiveDescription describes TTL settings
 type TimeToLiveDescription struct {
 	TimeToLiveStatus string `json:"TimeToLiveStatus"`
 	AttributeName    string `json:"AttributeName,omitempty"`
 }
 
-// DescribeTimeToLiveOutput is the output for DescribeTimeToLive
-type DescribeTimeToLiveOutput struct {
-	TimeToLiveDescription TimeToLiveDescription `json:"TimeToLiveDescription"`
+type TimeToLiveSpecification struct {
+	AttributeName string `json:"AttributeName"`
+	Enabled       bool   `json:"Enabled"`
 }
 
-// UpdateTimeToLiveOutput is the output for UpdateTimeToLive
-type UpdateTimeToLiveOutput struct {
-	TimeToLiveSpecification TimeToLiveDescription `json:"TimeToLiveSpecification"`
-}
-
-// ListTagsOfResourceOutput is the output for ListTagsOfResource
-type ListTagsOfResourceOutput struct {
-	Tags      []Tag  `json:"Tags"`
-	NextToken string `json:"NextToken,omitempty"`
-}
-
-// PointInTimeRecoveryDescription describes PITR status
 type PointInTimeRecoveryDescription struct {
-	PointInTimeRecoveryStatus  string  `json:"PointInTimeRecoveryStatus"`
-	EarliestRestorableDateTime float64 `json:"EarliestRestorableDateTime,omitempty"`
-	LatestRestorableDateTime   float64 `json:"LatestRestorableDateTime,omitempty"`
+	PointInTimeRecoveryStatus  string   `json:"PointInTimeRecoveryStatus"`
+	RecoveryPeriodInDays       *int32   `json:"RecoveryPeriodInDays,omitempty"`
+	EarliestRestorableDateTime *float64 `json:"EarliestRestorableDateTime,omitempty"`
+	LatestRestorableDateTime   *float64 `json:"LatestRestorableDateTime,omitempty"`
 }
 
-// ContinuousBackupsDescription describes continuous backup status
 type ContinuousBackupsDescription struct {
 	ContinuousBackupsStatus        string                         `json:"ContinuousBackupsStatus"`
 	PointInTimeRecoveryDescription PointInTimeRecoveryDescription `json:"PointInTimeRecoveryDescription"`
-}
-
-// DescribeContinuousBackupsOutput is the output for DescribeContinuousBackups
-type DescribeContinuousBackupsOutput struct {
-	ContinuousBackupsDescription ContinuousBackupsDescription `json:"ContinuousBackupsDescription"`
-}
-
-// UpdateContinuousBackupsOutput is the output for UpdateContinuousBackups
-type UpdateContinuousBackupsOutput struct {
-	ContinuousBackupsDescription ContinuousBackupsDescription `json:"ContinuousBackupsDescription"`
 }

@@ -1,0 +1,5 @@
+# Arguments the APIs never return (s3_bucket/s3_key/source_code_hash on the
+# function, source on the object) make these plan an update after import,
+# against real AWS too.
+aws_lambda_function.fn
+aws_s3_object.code

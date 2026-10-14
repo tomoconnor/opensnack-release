@@ -7,6 +7,7 @@ package db
 import (
 	"opensnack/internal/logging"
 	"os"
+	"strconv"
 	"time"
 
 	"gorm.io/driver/postgres"
@@ -33,11 +34,11 @@ func Connect() *gorm.DB {
 		panic(err)
 	}
 
-	// SetMaxIdleConns sets the maximum number of connections in the idle connection pool
-	sqlDB.SetMaxIdleConns(10)
-
-	// SetMaxOpenConns sets the maximum number of open connections to the database
-	sqlDB.SetMaxOpenConns(100)
+	// Keep the pool well under Postgres' max_connections, with room for every
+	// replica: the old fixed 100 per process ran the server out of clients
+	// under load. Requests queue for a connection instead.
+	sqlDB.SetMaxOpenConns(envInt("OPENSNACK_PG_MAX_OPEN", 25))
+	sqlDB.SetMaxIdleConns(envInt("OPENSNACK_PG_MAX_IDLE", 10))
 
 	// SetConnMaxLifetime sets the maximum amount of time a connection may be reused
 	sqlDB.SetConnMaxLifetime(time.Hour)
@@ -46,4 +47,11 @@ func Connect() *gorm.DB {
 	sqlDB.SetConnMaxIdleTime(10 * time.Minute)
 
 	return db
+}
+
+func envInt(name string, def int) int {
+	if v, err := strconv.Atoi(os.Getenv(name)); err == nil && v > 0 {
+		return v
+	}
+	return def
 }

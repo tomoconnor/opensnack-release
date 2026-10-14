@@ -1,0 +1,1 @@
+aws_volume_attachment.data {device_name}:{volume_id}:{instance_id}

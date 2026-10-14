@@ -5,210 +5,157 @@
 package s3control
 
 import (
-	"bytes"
-	"encoding/json"
 	"encoding/xml"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"opensnack/internal/api/s3"
+	"opensnack/internal/awsresponses"
 	"opensnack/internal/resource"
 	"opensnack/internal/util"
-
-	"opensnack/internal/awsresponses"
 )
 
+// Handler serves the S3 Control tagging API. Bucket tags live on the bucket
+// itself, so these operations and S3's ?tagging see the same tag set.
 type Handler struct {
 	Store resource.Store
+	s3    *s3.Handler
 }
 
 func NewHandler(store resource.Store) *Handler {
-	return &Handler{Store: store}
+	return &Handler{Store: store, s3: s3.NewHandler(store)}
 }
 
-//
-// --- XML Structures ---
-//
+const xmlns = "http://awss3control.amazonaws.com/doc/2018-08-20/"
 
-type Tag struct {
-	Key   string `xml:"Key"`
-	Value string `xml:"Value"`
+type tagSet struct {
+	Tags []s3.Tag `xml:"Tag"`
 }
 
-type TagSet struct {
-	Tags []Tag `xml:"Tag"`
-}
-
-type GetTaggingResult struct {
-	XMLName struct{} `xml:"Tagging"`
-	TagSet  TagSet   `xml:"TagSet"`
-}
-
-type ListTagsForResourceResult struct {
+type listTagsForResourceResult struct {
 	XMLName struct{} `xml:"ListTagsForResourceResult"`
-	Tags    TagSet   `xml:"Tags"`
+	Xmlns   string   `xml:"xmlns,attr"`
+	Tags    tagSet   `xml:"Tags"`
 }
 
-type PutBucketTaggingRequest struct {
-	XMLName struct{} `xml:"Tagging"`
-	TagSet  TagSet   `xml:"TagSet"`
+type tagResourceRequest struct {
+	XMLName struct{} `xml:"TagResourceRequest"`
+	Tags    tagSet   `xml:"Tags"`
 }
 
-type listTagsForResourceRequest struct {
-	XMLName     struct{} `xml:"ListTagsForResourceRequest"`
-	ResourceArn string   `xml:"ResourceArn"`
-}
-
+// Tags serves /v20180820/tags/{ResourceArn}:
 //
-// --- REQUIRED BY TERRAFORM ---
-// ListTagsForResource (S3Control)
-//
-
-func (h *Handler) ListTagsForResource(w http.ResponseWriter, r *http.Request) {
-	// Endpoint looks like:
-	// POST /s3-control/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Abucket
-	// Older clients may also send the ARN in the XML body.
-	arnStr := extractARNFromRequest(r)
-	if arnStr == "" {
-		// Mirror AWS by returning empty tagset on missing resource
-		w.WriteHeader(200)
-		awsresponses.WriteXML(w, ListTagsForResourceResult{})
-		return
-	}
-
-	bucket := util.ExtractBucketFromARN(arnStr)
-
-	ns := util.NamespaceFromHeader(r)
-
-	// Look up tags in the bucket’s resource entry
-	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
-	if err != nil {
-		// Return empty tagset — AWS does this
-		w.WriteHeader(200)
-		awsresponses.WriteXML(w, ListTagsForResourceResult{})
-		return
-	}
-
-	var attrs map[string]any
-	if err := xml.Unmarshal(res.Attributes, &attrs); err != nil {
-		attrs = map[string]any{}
-	}
-
-	tagMap, _ := attrs["tags"].(map[string]any)
-	var tags []Tag
-	for k, v := range tagMap {
-		tags = append(tags, Tag{Key: k, Value: fmt.Sprintf("%v", v)})
-	}
-
-	w.WriteHeader(200)
-	awsresponses.WriteXML(w, ListTagsForResourceResult{
-		Tags: TagSet{Tags: tags},
-	})
-}
-
-// extractARNFromRequest tolerates both path-encoded and body-encoded ARNs.
-func extractARNFromRequest(r *http.Request) string {
-	// 1) Raw path suffix after /tags/
-	if idx := strings.Index(r.URL.Path, "/tags/"); idx != -1 {
-		raw := r.URL.Path[idx+len("/tags/"):]
-		if decoded, err := url.PathUnescape(raw); err == nil {
-			return decoded
-		}
-	}
-
-	// 2) XML body
-	body, _ := io.ReadAll(r.Body)
-	// Restore body for downstream reuse
-	r.Body = io.NopCloser(bytes.NewBuffer(body))
-
-	var req listTagsForResourceRequest
-	if err := xml.Unmarshal(body, &req); err == nil && req.ResourceArn != "" {
-		return req.ResourceArn
-	}
-
-	return ""
-}
-
-//
-// --- Optional but recommended: PUT / GET bucket tagging ---
-// Matches: PUT /bucket?tagging
-//          GET /bucket?tagging
-//
-
-func (h *Handler) PutBucketTagging(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-	// Extract bucket from path
-	path := strings.TrimPrefix(r.URL.Path, "/")
-	parts := strings.SplitN(path, "/", 2)
-	bucket := parts[0]
-
-	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
-	if err != nil {
-		w.WriteHeader(404)
-		awsresponses.WriteXML(w, s3.NoSuchBucket(bucket))
-		return
-	}
-
-	body, _ := io.ReadAll(r.Body)
-	req := PutBucketTaggingRequest{}
-	xml.Unmarshal(body, &req)
-
-	// Convert tags to map[string]any
-	tagMap := map[string]any{}
-	for _, t := range req.TagSet.Tags {
-		tagMap[t.Key] = t.Value
-	}
-
-	// Load attributes
-	var attrs map[string]any
-	json.Unmarshal(res.Attributes, &attrs)
-	attrs["tags"] = tagMap
-
-	buf, _ := json.Marshal(attrs)
-	res.Attributes = buf
-	if err := h.Store.Update(res); err != nil {
-		awsresponses.WriteJSON(w, 500, err.Error())
-		return
-	}
-
-	w.WriteHeader(200)
-}
-
-func (h *Handler) GetBucketTagging(w http.ResponseWriter, r *http.Request) {
-	ns := util.NamespaceFromHeader(r)
-	// Extract bucket from path
-	path := strings.TrimPrefix(r.URL.Path, "/")
-	parts := strings.SplitN(path, "/", 2)
-	bucket := parts[0]
-
-	res, err := h.Store.Get(bucket, "s3", "bucket", ns)
-	if err != nil {
-		w.WriteHeader(404)
-		awsresponses.WriteXML(w, s3.NoSuchBucket(bucket))
-		return
-	}
-
-	var attrs map[string]any
-	json.Unmarshal(res.Attributes, &attrs)
-
-	tagMap, ok := attrs["tags"].(map[string]any)
+//	GET    ListTagsForResource
+//	POST   TagResource
+//	DELETE UntagResource (?tagKeys=...)
+func (h *Handler) Tags(w http.ResponseWriter, r *http.Request) {
+	arn := resourceARN(r)
+	bucket, ok := bucketFromARN(arn)
 	if !ok {
-		// Return empty tagset if no tags stored
-		w.WriteHeader(200)
-		awsresponses.WriteXML(w, GetTaggingResult{})
+		writeError(w, http.StatusBadRequest, "InvalidRequest", "Unsupported resource ARN: "+arn)
+		return
+	}
+	ns := util.GlobalNamespace(r)
+
+	var err error
+	switch r.Method {
+	case http.MethodGet:
+		var tags []s3.Tag
+		if tags, err = h.s3.BucketTags(ns, bucket); err == nil {
+			writeXML(w, http.StatusOK, listTagsForResourceResult{Xmlns: xmlns, Tags: tagSet{tags}})
+			return
+		}
+	case http.MethodPost:
+		body, _ := io.ReadAll(r.Body)
+		var in tagResourceRequest
+		if xml.Unmarshal(body, &in) != nil {
+			writeError(w, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed")
+			return
+		}
+		err = h.s3.UpdateBucketTags(ns, bucket, func(old []s3.Tag) []s3.Tag {
+			byKey := map[string]string{}
+			for _, t := range old {
+				byKey[t.Key] = t.Value
+			}
+			for _, t := range in.Tags.Tags {
+				byKey[t.Key] = t.Value
+			}
+			out := make([]s3.Tag, 0, len(byKey))
+			for k, v := range byKey {
+				out = append(out, s3.Tag{Key: k, Value: v})
+			}
+			return out
+		})
+	case http.MethodDelete:
+		drop := map[string]bool{}
+		for _, k := range r.URL.Query()["tagKeys"] {
+			drop[k] = true
+		}
+		err = h.s3.UpdateBucketTags(ns, bucket, func(old []s3.Tag) []s3.Tag {
+			var out []s3.Tag
+			for _, t := range old {
+				if !drop[t.Key] {
+					out = append(out, t)
+				}
+			}
+			return out
+		})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "The specified method is not allowed against this resource.")
 		return
 	}
 
-	var tags []Tag
-	for k, v := range tagMap {
-		tags = append(tags, Tag{Key: k, Value: fmt.Sprintf("%v", v)})
+	switch {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case s3.IsNoSuchBucket(err):
+		writeError(w, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
+	default:
+		writeError(w, http.StatusInternalServerError, "InternalError", err.Error())
 	}
+}
 
-	w.WriteHeader(200)
-	awsresponses.WriteXML(w, GetTaggingResult{
-		TagSet: TagSet{Tags: tags},
-	})
+// resourceARN reads the ARN from the path, where it is percent-encoded
+// (and may contain encoded slashes).
+func resourceARN(r *http.Request) string {
+	raw := r.URL.EscapedPath()
+	_, after, found := strings.Cut(raw, "/tags/")
+	if !found {
+		return ""
+	}
+	if decoded, err := url.PathUnescape(after); err == nil {
+		return decoded
+	}
+	return after
+}
+
+// bucketFromARN accepts arn:<partition>:s3:::<bucket>.
+func bucketFromARN(arn string) (string, bool) {
+	parts := strings.SplitN(arn, ":", 6)
+	if len(parts) != 6 || parts[0] != "arn" || parts[2] != "s3" || parts[5] == "" || strings.Contains(parts[5], "/") {
+		return "", false
+	}
+	return parts[5], true
+}
+
+func writeXML(w http.ResponseWriter, status int, v any) {
+	out, _ := xml.Marshal(v)
+	awsresponses.WriteAWSHeaders(w)
+	w.Header().Set("Content-Type", "application/xml")
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(xml.Header))
+	_, _ = w.Write(out)
+}
+
+// writeError uses the S3 Control error shape, which wraps Error in
+// ErrorResponse.
+func writeError(w http.ResponseWriter, status int, code, msg string) {
+	writeXML(w, status, struct {
+		XMLName   struct{} `xml:"ErrorResponse"`
+		Code      string   `xml:"Error>Code"`
+		Message   string   `xml:"Error>Message"`
+		RequestID string   `xml:"RequestId"`
+	}{Code: code, Message: msg, RequestID: awsresponses.NextRequestID()})
 }

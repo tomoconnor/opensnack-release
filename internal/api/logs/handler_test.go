@@ -6,8 +6,7 @@ package logs_test
 
 import (
 	"encoding/json"
-	"errors"
-	"net/http"
+	"fmt"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -17,170 +16,316 @@ import (
 	"opensnack/internal/resource"
 )
 
-//
-// MockStore (same as other services)
-//
+const scope = "ns1@us-east-1"
 
-type MockStore struct {
-	data map[string]resource.Resource
+type client struct {
+	t *testing.T
+	h *logs.Handler
 }
 
-func NewMockStore() *MockStore {
-	return &MockStore{data: map[string]resource.Resource{}}
+func newClient(t *testing.T) (*client, resource.Store) {
+	store := resource.NewMemStore()
+	return &client{t: t, h: logs.NewHandler(store)}, store
 }
 
-func key(id, ns string) string { return ns + "|" + id }
-
-func (m *MockStore) Create(r *resource.Resource) error {
-	m.data[key(r.ID, r.Namespace)] = *r
-	return nil
+// call runs an operation and returns the status and decoded body.
+func (c *client) call(op string, body any) (int, map[string]any) {
+	c.t.Helper()
+	buf, _ := json.Marshal(body)
+	req := httptest.NewRequest("POST", "/", strings.NewReader(string(buf)))
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", "Logs_20140328."+op)
+	req.Header.Set("User-Agent", "opensnack-test custom-ns1")
+	rec := httptest.NewRecorder()
+	c.h.Dispatch(rec, req)
+	out := map[string]any{}
+	json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
 }
 
-func (m *MockStore) Update(r *resource.Resource) error {
-	m.data[key(r.ID, r.Namespace)] = *r
-	return nil
-}
-
-func (m *MockStore) Get(id, s, t, ns string) (*resource.Resource, error) {
-	v, ok := m.data[key(id, ns)]
-	if !ok {
-		return nil, errors.New("not found")
+func (c *client) must(op string, body any) map[string]any {
+	c.t.Helper()
+	code, out := c.call(op, body)
+	if code != 200 {
+		c.t.Fatalf("%s: %d %v", op, code, out)
 	}
-	return &v, nil
+	return out
 }
 
-func (m *MockStore) List(s, t, ns string) ([]resource.Resource, error) {
-	out := []resource.Resource{}
-	for _, r := range m.data {
-		if r.Service == s && r.Type == t && r.Namespace == ns {
-			out = append(out, r)
+func (c *client) mustFail(op string, body any, errType string) {
+	c.t.Helper()
+	code, out := c.call(op, body)
+	if code == 200 || out["__type"] != errType {
+		c.t.Fatalf("%s: want %s, got %d %v", op, errType, code, out)
+	}
+}
+
+func messages(out map[string]any) []string {
+	var msgs []string
+	for _, e := range out["events"].([]any) {
+		msgs = append(msgs, e.(map[string]any)["message"].(string))
+	}
+	return msgs
+}
+
+func TestLogGroupLifecycle(t *testing.T) {
+	c, store := newClient(t)
+	c.must("CreateLogGroup", map[string]any{"logGroupName": "/app/web", "tags": map[string]string{"team": "team"}, "kmsKeyId": "arn:aws:kms:us-east-1:000000000000:key/abc"})
+	c.mustFail("CreateLogGroup", map[string]any{"logGroupName": "/app/web"}, "ResourceAlreadyExistsException")
+	c.must("PutRetentionPolicy", map[string]any{"logGroupName": "/app/web", "retentionInDays": 14})
+	c.mustFail("PutRetentionPolicy", map[string]any{"logGroupName": "/app/web", "retentionInDays": 13}, "InvalidParameterException")
+
+	out := c.must("DescribeLogGroups", map[string]any{"logGroupNamePrefix": "/app/web"})
+	g := out["logGroups"].([]any)[0].(map[string]any)
+	if g["retentionInDays"] != 14.0 || g["logGroupClass"] != "STANDARD" || g["kmsKeyId"] == nil {
+		t.Fatalf("group: %v", g)
+	}
+	arn := g["logGroupArn"].(string)
+	if !strings.HasSuffix(g["arn"].(string), ":*") || strings.HasSuffix(arn, ":*") {
+		t.Fatalf("arns: %v", g)
+	}
+
+	c.must("DeleteRetentionPolicy", map[string]any{"logGroupName": "/app/web"})
+	c.must("DisassociateKmsKey", map[string]any{"logGroupName": "/app/web"})
+	g = c.must("DescribeLogGroups", map[string]any{})["logGroups"].([]any)[0].(map[string]any)
+	if _, ok := g["retentionInDays"]; ok {
+		t.Fatalf("retention not removed: %v", g)
+	}
+	if _, ok := g["kmsKeyId"]; ok {
+		t.Fatalf("kms key not removed: %v", g)
+	}
+
+	c.must("TagResource", map[string]any{"resourceArn": arn, "tags": map[string]string{"env": "prod"}})
+	c.must("UntagResource", map[string]any{"resourceArn": arn, "tagKeys": []string{"team"}})
+	tags := c.must("ListTagsForResource", map[string]any{"resourceArn": arn})["tags"].(map[string]any)
+	if len(tags) != 1 || tags["env"] != "prod" {
+		t.Fatalf("tags: %v", tags)
+	}
+	c.must("TagLogGroup", map[string]any{"logGroupName": "/app/web", "tags": map[string]string{"old": "api"}})
+	tags = c.must("ListTagsLogGroup", map[string]any{"logGroupName": "/app/web"})["tags"].(map[string]any)
+	if len(tags) != 2 {
+		t.Fatalf("legacy tags: %v", tags)
+	}
+
+	c.must("PutLogGroupDeletionProtection", map[string]any{"logGroupIdentifier": arn, "deletionProtectionEnabled": true})
+	c.mustFail("DeleteLogGroup", map[string]any{"logGroupName": "/app/web"}, "InvalidOperationException")
+	c.must("PutLogGroupDeletionProtection", map[string]any{"logGroupIdentifier": "/app/web", "deletionProtectionEnabled": false})
+
+	c.must("CreateLogStream", map[string]any{"logGroupName": "/app/web", "logStreamName": "s1"})
+	c.must("DeleteLogGroup", map[string]any{"logGroupName": "/app/web"})
+	c.mustFail("DeleteLogGroup", map[string]any{"logGroupName": "/app/web"}, "ResourceNotFoundException")
+	if streams, _ := store.List("logs", "log_stream", scope); len(streams) != 0 {
+		t.Fatalf("streams left behind: %v", streams)
+	}
+}
+
+func TestPutAndGetLogEvents(t *testing.T) {
+	c, _ := newClient(t)
+	c.must("CreateLogGroup", map[string]any{"logGroupName": "g"})
+	c.mustFail("PutLogEvents", map[string]any{"logGroupName": "g", "logStreamName": "s", "logEvents": []any{map[string]any{"timestamp": 1, "message": "x"}}}, "ResourceNotFoundException")
+	c.must("CreateLogStream", map[string]any{"logGroupName": "g", "logStreamName": "s"})
+
+	base := time.Now().Add(-time.Hour).UnixMilli()
+	var evs []any
+	for i := 0; i < 25; i++ {
+		evs = append(evs, map[string]any{"timestamp": base + int64(i)*1000, "message": fmt.Sprintf("line %02d", i)})
+	}
+	c.must("PutLogEvents", map[string]any{"logGroupName": "g", "logStreamName": "s", "logEvents": evs})
+
+	c.mustFail("PutLogEvents", map[string]any{"logGroupName": "g", "logStreamName": "s", "logEvents": []any{
+		map[string]any{"timestamp": base + 5, "message": "b"}, map[string]any{"timestamp": base, "message": "a"},
+	}}, "InvalidParameterException")
+
+	// From the head, in pages of 10, following the forward token.
+	var all []string
+	token := ""
+	for i := 0; i < 5; i++ {
+		req := map[string]any{"logGroupName": "g", "logStreamName": "s", "startFromHead": true, "limit": 10}
+		if token != "" {
+			req["nextToken"] = token
+		}
+		out := c.must("GetLogEvents", req)
+		all = append(all, messages(out)...)
+		if out["nextForwardToken"] == token {
+			break
+		}
+		token = out["nextForwardToken"].(string)
+	}
+	if len(all) != 25 || all[0] != "line 00" || all[24] != "line 24" {
+		t.Fatalf("forward paging: %v", all)
+	}
+
+	// Default is the tail; the backward token pages towards the start.
+	out := c.must("GetLogEvents", map[string]any{"logGroupName": "g", "logStreamName": "s", "limit": 10})
+	if m := messages(out); len(m) != 10 || m[0] != "line 15" || m[9] != "line 24" {
+		t.Fatalf("tail: %v", m)
+	}
+	out = c.must("GetLogEvents", map[string]any{"logGroupName": "g", "logStreamName": "s", "limit": 10, "nextToken": out["nextBackwardToken"]})
+	if m := messages(out); len(m) != 10 || m[0] != "line 05" || m[9] != "line 14" {
+		t.Fatalf("backward page: %v", m)
+	}
+
+	// Time range: start inclusive, end exclusive.
+	out = c.must("GetLogEvents", map[string]any{"logGroupName": "g", "logStreamName": "s", "startFromHead": true,
+		"startTime": base + 3000, "endTime": base + 6000})
+	if m := messages(out); len(m) != 3 || m[0] != "line 03" || m[2] != "line 05" {
+		t.Fatalf("time range: %v", m)
+	}
+
+	streams := c.must("DescribeLogStreams", map[string]any{"logGroupName": "g"})["logStreams"].([]any)
+	s := streams[0].(map[string]any)
+	if s["firstEventTimestamp"] != float64(base) || s["lastEventTimestamp"] != float64(base+24000) {
+		t.Fatalf("stream stats: %v", s)
+	}
+}
+
+func TestPutLogEventsRejectsOldEvents(t *testing.T) {
+	c, _ := newClient(t)
+	c.must("CreateLogGroup", map[string]any{"logGroupName": "g"})
+	c.must("CreateLogStream", map[string]any{"logGroupName": "g", "logStreamName": "s"})
+	now := time.Now()
+	out := c.must("PutLogEvents", map[string]any{"logGroupName": "g", "logStreamName": "s", "logEvents": []any{
+		map[string]any{"timestamp": now.Add(-15 * 24 * time.Hour).UnixMilli(), "message": "ancient"},
+		map[string]any{"timestamp": now.Add(-15*24*time.Hour + time.Hour).UnixMilli(), "message": "fine?"},
+	}})
+	if out["rejectedLogEventsInfo"] == nil {
+		t.Fatalf("expected rejected info: %v", out)
+	}
+}
+
+func TestFilterLogEvents(t *testing.T) {
+	c, store := newClient(t)
+	now := time.Now().UnixMilli()
+	write := func(stream string, msgs ...string) {
+		var evs []logs.InputEvent
+		for i, m := range msgs {
+			evs = append(evs, logs.InputEvent{Timestamp: now + int64(i), Message: m})
+		}
+		if err := logs.Append(store, logs.Target{Scope: scope, AccountID: "123456789012", Group: "/example-orders/orders", Stream: stream}, evs); err != nil {
+			t.Fatal(err)
 		}
 	}
-	return out, nil
+	write("a",
+		"INFO orders ready",
+		"ERROR fleet Nightly missing",
+		"ERROR disk full on orders",
+		`{"level":"error","worker":"Bernard","latency":420,"tags":["night"]}`,
+		`{"level":"info","worker":"Pepper","latency":12}`,
+	)
+	write("b",
+		"WARN rain heavy",
+		`127.0.0.1 - frank [10/Oct/2026:13:55:36 -0700] "GET /asset HTTP/1.0" 404 2326`,
+		`127.0.0.1 - app [10/Oct/2026:13:55:37 -0700] "GET /list HTTP/1.0" 200 512`,
+	)
+
+	cases := []struct {
+		pattern string
+		want    []string
+	}{
+		{"", nil}, // all 8
+		{"ERROR", []string{"ERROR fleet Nightly missing", "ERROR disk full on orders"}},
+		{"ERROR orders", []string{"ERROR disk full on orders"}},
+		{`"disk full"`, []string{"ERROR disk full on orders"}},
+		{"ERROR -Nightly", []string{"ERROR disk full on orders"}},
+		{"?WARN ?Nightly", []string{"WARN rain heavy", "ERROR fleet Nightly missing"}}, // ordered by timestamp across streams
+		{"%Nig[a-z]+%", []string{"ERROR fleet Nightly missing"}},
+		{`{ $.level = "error" }`, []string{`{"level":"error","worker":"Bernard","latency":420,"tags":["night"]}`}},
+		{`{ $.latency > 100 && $.worker = "Bern*" }`, []string{`{"level":"error","worker":"Bernard","latency":420,"tags":["night"]}`}},
+		{`{ ($.latency < 20) || $.tags[0] = "night" }`, []string{
+			`{"level":"error","worker":"Bernard","latency":420,"tags":["night"]}`, `{"level":"info","worker":"Pepper","latency":12}`}},
+		{`{ $.missing NOT EXISTS && $.level != "error" }`, []string{`{"level":"info","worker":"Pepper","latency":12}`}},
+		{`[ip, id, user, timestamp, request, status_code = 4*, size]`, []string{
+			`127.0.0.1 - frank [10/Oct/2026:13:55:36 -0700] "GET /asset HTTP/1.0" 404 2326`}},
+		{`[..., status = 200, bytes]`, []string{
+			`127.0.0.1 - app [10/Oct/2026:13:55:37 -0700] "GET /list HTTP/1.0" 200 512`}},
+	}
+	for _, tc := range cases {
+		out := c.must("FilterLogEvents", map[string]any{"logGroupName": "/example-orders/orders", "filterPattern": tc.pattern})
+		got := messages(out)
+		if tc.want == nil {
+			if len(got) != 8 {
+				t.Errorf("%q: got %d events", tc.pattern, len(got))
+			}
+			continue
+		}
+		if strings.Join(got, "|") != strings.Join(tc.want, "|") {
+			t.Errorf("%q:\n got %q\nwant %q", tc.pattern, got, tc.want)
+		}
+	}
+
+	// Stream selection and paging.
+	out := c.must("FilterLogEvents", map[string]any{"logGroupName": "/example-orders/orders", "logStreamNames": []string{"b"}, "limit": 2})
+	if len(messages(out)) != 2 || out["nextToken"] == nil {
+		t.Fatalf("page 1: %v", out)
+	}
+	out = c.must("FilterLogEvents", map[string]any{"logGroupName": "/example-orders/orders", "logStreamNames": []string{"b"}, "limit": 2, "nextToken": out["nextToken"]})
+	if m := messages(out); len(m) != 1 || !strings.Contains(m[0], "app") {
+		t.Fatalf("page 2: %v", out)
+	}
+
+	c.mustFail("FilterLogEvents", map[string]any{"logGroupName": "/example-orders/orders", "filterPattern": `{ $.x = }`}, "InvalidParameterException")
 }
 
-func (m *MockStore) Delete(id, s, t, ns string) error {
-	delete(m.data, key(id, ns))
-	return nil
-}
-
-//
-// Helpers
-//
-
-func ctx(method, target string, body *strings.Reader, targetHeader string) (*httptest.ResponseRecorder, *http.Request) {
-	if body == nil {
-		body = strings.NewReader("")
+func TestMetricAndSubscriptionFilters(t *testing.T) {
+	c, _ := newClient(t)
+	c.must("CreateLogGroup", map[string]any{"logGroupName": "g"})
+	mf := map[string]any{
+		"logGroupName": "g", "filterName": "errors", "filterPattern": "ERROR",
+		"metricTransformations": []any{map[string]any{"metricName": "Errors", "metricNamespace": "Team", "metricValue": "1", "unit": "None"}},
+	}
+	c.must("PutMetricFilter", mf)
+	out := c.must("DescribeMetricFilters", map[string]any{"logGroupName": "g", "filterNamePrefix": "err"})
+	f := out["metricFilters"].([]any)[0].(map[string]any)
+	if f["filterPattern"] != "ERROR" || f["logGroupName"] != "g" {
+		t.Fatalf("filter: %v", f)
+	}
+	tr := f["metricTransformations"].([]any)[0].(map[string]any)
+	if tr["unit"] != "None" || tr["metricValue"] != "1" {
+		t.Fatalf("transformation: %v", tr)
+	}
+	g := c.must("DescribeLogGroups", map[string]any{})["logGroups"].([]any)[0].(map[string]any)
+	if g["metricFilterCount"] != 1.0 {
+		t.Fatalf("metricFilterCount: %v", g)
 	}
 
-	req := httptest.NewRequest(method, target, body)
-	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
-	req.Header.Set("X-Amz-Target", targetHeader)
-	// Namespace isolation travels in the User-Agent (see k6/README.md):
-	// Terraform cannot set custom headers, so a "custom-<ns>" suffix carries it.
-	req.Header.Set("User-Agent", "opensnack-test custom-ns1")
-
-	return httptest.NewRecorder(), req
-}
-
-//
-// TESTS
-//
-
-func TestCreateLogGroup(t *testing.T) {
-	store := NewMockStore()
-	h := logs.NewHandler(store)
-
-	body := `{"logGroupName":"MyGroup"}`
-	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.CreateLogGroup")
-	h.Dispatch(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("expected 200, got %d", rec.Code)
+	tm := c.must("TestMetricFilter", map[string]any{"filterPattern": "[a, b = 5*]", "logEventMessages": []string{"x 500", "y 200"}})
+	if m := tm["matches"].([]any); len(m) != 1 {
+		t.Fatalf("test filter: %v", tm)
 	}
 
-	if _, err := store.Get("MyGroup", "logs", "log_group", "ns1"); err != nil {
-		t.Fatalf("log group not created")
+	c.must("PutSubscriptionFilter", map[string]any{"logGroupName": "g", "filterName": "s", "filterPattern": "", "destinationArn": "arn:aws:lambda:us-east-1:000000000000:function:f"})
+	sf := c.must("DescribeSubscriptionFilters", map[string]any{"logGroupName": "g"})["subscriptionFilters"].([]any)[0].(map[string]any)
+	if sf["distribution"] != "ByLogStream" {
+		t.Fatalf("subscription filter: %v", sf)
 	}
+	c.must("DeleteSubscriptionFilter", map[string]any{"logGroupName": "g", "filterName": "s"})
+	c.must("DeleteMetricFilter", map[string]any{"logGroupName": "g", "filterName": "errors"})
+	c.mustFail("DeleteMetricFilter", map[string]any{"logGroupName": "g", "filterName": "errors"}, "ResourceNotFoundException")
 }
 
-func TestDescribeLogGroups(t *testing.T) {
-	store := NewMockStore()
-	h := logs.NewHandler(store)
-
-	// seed
-	attrs := map[string]any{"group": "G1", "arn": logs.LogGroupArn("G1"), "created_at": time.Now().UnixMilli()}
-	buf, _ := json.Marshal(attrs)
-
-	store.Create(&resource.Resource{
-		ID:         "G1",
-		Namespace:  "ns1",
-		Service:    "logs",
-		Type:       "log_group",
-		Attributes: buf,
-	})
-
-	rec, req := ctx("POST", "/logs", strings.NewReader("{}"), "Logs_20140328.DescribeLogGroups")
-	h.Dispatch(rec, req)
-
-	if !strings.Contains(rec.Body.String(), `"logGroupName":"G1"`) {
-		t.Fatalf("missing log group: %s", rec.Body.String())
+func TestAppendCreatesGroupAndStream(t *testing.T) {
+	c, store := newClient(t)
+	tgt := logs.Target{Scope: scope, AccountID: "123456789012", Group: "/aws/lambda/fn", Stream: "2026/10/14/[$LATEST]abc"}
+	if err := logs.Append(store, tgt, []logs.InputEvent{{Message: "START"}, {Message: "END"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := logs.Append(store, tgt, []logs.InputEvent{{Message: "again"}}); err != nil {
+		t.Fatal(err)
+	}
+	g := c.must("DescribeLogGroups", map[string]any{})["logGroups"].([]any)[0].(map[string]any)
+	if g["arn"] != "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/fn:*" {
+		t.Fatalf("group: %v", g)
+	}
+	out := c.must("GetLogEvents", map[string]any{"logGroupName": tgt.Group, "logStreamName": tgt.Stream, "startFromHead": true})
+	if m := messages(out); len(m) != 3 {
+		t.Fatalf("events: %v", m)
 	}
 }
 
-func TestCreateLogStream(t *testing.T) {
-	store := NewMockStore()
-	h := logs.NewHandler(store)
-
-	body := `{"logGroupName":"GroupA","logStreamName":"Stream1"}`
-	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.CreateLogStream")
-	h.Dispatch(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("got %d", rec.Code)
-	}
-
-	if _, err := store.Get("GroupA/Stream1", "logs", "log_stream", "ns1"); err != nil {
-		t.Fatalf("log stream not created")
-	}
-}
-
-func TestDescribeLogStreams(t *testing.T) {
-	store := NewMockStore()
-	h := logs.NewHandler(store)
-
-	attrs := map[string]any{"group": "G2", "stream": "S1", "arn": logs.LogStreamArn("G2", "S1"), "created_at": time.Now().UnixMilli()}
-	buf, _ := json.Marshal(attrs)
-
-	store.Create(&resource.Resource{
-		ID: "G2/S1", Namespace: "ns1",
-		Service: "logs", Type: "log_stream",
-		Attributes: buf,
-	})
-
-	body := `{"logGroupName":"G2"}`
-	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.DescribeLogStreams")
-	h.Dispatch(rec, req)
-
-	if !strings.Contains(rec.Body.String(), `"logStreamName":"S1"`) {
-		t.Fatalf("missing S1: %s", rec.Body.String())
-	}
-}
-
-func TestPutLogEvents(t *testing.T) {
-	store := NewMockStore()
-	h := logs.NewHandler(store)
-
-	body := `{"logGroupName":"G1","logStreamName":"S1","logEvents":[{"timestamp":1,"message":"hi"}]}`
-	rec, req := ctx("POST", "/logs", strings.NewReader(body), "Logs_20140328.PutLogEvents")
-
-	h.Dispatch(rec, req)
-
-	if rec.Code != 200 {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-
-	if !strings.Contains(rec.Body.String(), `"nextSequenceToken":"0"`) {
-		t.Fatalf("missing nextSequenceToken: %s", rec.Body.String())
+func TestPatternParseErrors(t *testing.T) {
+	for _, p := range []string{`{ $.a = }`, `{ $.a > "x" }`, `[a, , b]`, `"unterminated`, `{ $.a = 1`} {
+		if _, err := logs.ParsePattern(p); err == nil {
+			t.Errorf("%q: expected an error", p)
+		}
 	}
 }

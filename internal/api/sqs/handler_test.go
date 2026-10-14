@@ -16,6 +16,7 @@ import (
 
 	"opensnack/internal/api/sqs"
 	"opensnack/internal/resource"
+	"opensnack/internal/util"
 )
 
 //
@@ -111,14 +112,16 @@ func TestCreateQueue_Basic(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	var resp sqs.CreateQueueResponse
+	var resp struct {
+		QueueUrl string `xml:"CreateQueueResult>QueueUrl"`
+	}
 	if xml.Unmarshal(rec.Body.Bytes(), &resp) != nil {
 		t.Fatalf("invalid XML returned: %s", rec.Body.String())
 	}
 
-	expectedURL := "http://localhost:4566/000000000000/testqueue"
-	if resp.CreateQueueResult.QueueUrl != expectedURL {
-		t.Fatalf("wrong queue URL: %s", resp.CreateQueueResult.QueueUrl)
+	expectedURL := "http://example.com/000000000000/testqueue"
+	if resp.QueueUrl != expectedURL {
+		t.Fatalf("wrong queue URL: %s", resp.QueueUrl)
 	}
 }
 
@@ -161,7 +164,7 @@ func TestListQueues(t *testing.T) {
 		buf, _ := json.Marshal(attr)
 		store.Create(&resource.Resource{
 			ID:         name,
-			Namespace:  "ns1",
+			Namespace:  "ns1@us-east-1",
 			Service:    "sqs",
 			Type:       "queue",
 			Attributes: buf,
@@ -175,11 +178,13 @@ func TestListQueues(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	var resp sqs.ListQueuesResponse
+	var resp struct {
+		QueueUrls []string `xml:"ListQueuesResult>QueueUrl"`
+	}
 	xml.Unmarshal(rec.Body.Bytes(), &resp)
 
-	if len(resp.ListQueuesResult.QueueUrls) != 3 {
-		t.Fatalf("expected 3 queues, got %d", len(resp.ListQueuesResult.QueueUrls))
+	if len(resp.QueueUrls) != 3 {
+		t.Fatalf("expected 3 queues, got %d", len(resp.QueueUrls))
 	}
 }
 
@@ -195,7 +200,7 @@ func TestGetQueueUrl_Found(t *testing.T) {
 
 	store.Create(&resource.Resource{
 		ID:         "foundq",
-		Namespace:  "ns1",
+		Namespace:  "ns1@us-east-1",
 		Service:    "sqs",
 		Type:       "queue",
 		Attributes: buf,
@@ -208,7 +213,7 @@ func TestGetQueueUrl_Found(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	if !strings.Contains(rec.Body.String(), "<QueueUrl>http://localhost:4566/000000000000/foundq</QueueUrl>") {
+	if !strings.Contains(rec.Body.String(), "<QueueUrl>http://example.com/000000000000/foundq</QueueUrl>") {
 		t.Fatalf("unexpected body: %s", rec.Body.String())
 	}
 }
@@ -245,7 +250,7 @@ func TestDeleteQueue(t *testing.T) {
 	buf, _ := json.Marshal(entry)
 	store.Create(&resource.Resource{
 		ID:         "delq",
-		Namespace:  "ns1",
+		Namespace:  "ns1@us-east-1",
 		Service:    "sqs",
 		Type:       "queue",
 		Attributes: buf,
@@ -259,8 +264,28 @@ func TestDeleteQueue(t *testing.T) {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
 
-	// Body must be empty
-	if rec.Body.Len() != 0 {
-		t.Fatalf("expected empty body, got: %s", rec.Body.String())
+	if !strings.Contains(rec.Body.String(), "<DeleteQueueResponse") {
+		t.Fatalf("expected DeleteQueueResponse, got: %s", rec.Body.String())
+	}
+	if _, err := store.Get("delq", "sqs", "queue", "ns1@us-east-1"); err == nil {
+		t.Fatal("queue still exists")
+	}
+}
+
+// Queue URLs are built from the host the client used, so they work at the
+// real AWS endpoint and carry the caller's account.
+func TestQueueURL_FollowsHostAndAccount(t *testing.T) {
+	h := sqs.NewHandler(NewMockStore())
+	rec, req := newContext("POST", "/?Action=CreateQueue&QueueName=hosted", nil)
+	req.Host = "sqs.eu-west-1.amazonaws.com"
+	req = req.WithContext(util.WithIdentity(req.Context(), &util.Identity{
+		Namespace: "p1", AccountID: "123456789012", Region: "eu-west-1",
+	}))
+
+	h.Dispatch(rec, req)
+
+	want := "<QueueUrl>https://sqs.eu-west-1.amazonaws.com/123456789012/hosted</QueueUrl>"
+	if !strings.Contains(rec.Body.String(), want) {
+		t.Fatalf("want %s in %s", want, rec.Body.String())
 	}
 }

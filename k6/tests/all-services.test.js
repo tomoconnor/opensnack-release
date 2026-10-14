@@ -29,7 +29,7 @@ export const options = {
 
 const BASE_URL = config.endpoint;
 
-// Helper for JSON API requests (KMS, SSM, SecretsManager, Lambda, Logs)
+// Helper for JSON API requests (KMS, SSM, SecretsManager, Logs)
 function jsonApiRequest(url, target, body) {
   return http.post(url, JSON.stringify(body), {
     headers: {
@@ -38,6 +38,28 @@ function jsonApiRequest(url, target, body) {
       'User-Agent': getUserAgent(),
     },
   });
+}
+
+// Lambda speaks REST-JSON at its real paths. The zip is an empty archive.
+const EMPTY_ZIP = 'UEsFBgAAAAAAAAAAAAAAAAAAAAAAAA==';
+function lambdaRequest(method, path, body, tags) {
+  return http.request(method, `${BASE_URL}/lambda/2015-03-31/functions${path}`, body === undefined ? null : JSON.stringify(body), {
+    headers: { 'Content-Type': 'application/json', 'User-Agent': getUserAgent() },
+    tags,
+  });
+}
+
+// amazonLinuxImageId asks opensnack's EC2 image catalogue for an Amazon Linux
+// 2023 AMI. Image IDs differ per region, so they can't be hardcoded.
+function amazonLinuxImageId(ec2Url) {
+  const req = buildQueryRequest('DescribeImages', {
+    'Owner.1': 'amazon',
+    'Filter.1.Name': 'name',
+    'Filter.1.Value.1': 'al2023-ami-2023*-x86_64',
+  }, '2016-11-15');
+  const res = http.post(ec2Url, req.body, { headers: req.headers, tags: { operation: 'ec2_describe_images' } });
+  const m = /<imageId>(ami-[0-9a-f]+)<\/imageId>/.exec(res.body || '');
+  return m ? m[1] : '';
 }
 
 export default function () {
@@ -49,7 +71,7 @@ export default function () {
   const queueName = `k6-all-queue-${testId}`;
   const topicName = `k6-all-topic-${testId}`;
   const userName = `k6-all-user-${testId}`;
-  const instanceImageId = 'ami-12345678';
+  const instanceImageId = amazonLinuxImageId(`${BASE_URL}/ec2`);
   const cacheClusterId = `k6-cache-${testId}`;
   const kmsKeyAlias = `k6-key-${testId}`;
   const lambdaFunctionName = `k6-lambda-${testId}`;
@@ -307,23 +329,19 @@ export default function () {
   // ─── Lambda ──────────────────────────────────────────────────────────────────
   //
   group('Lambda Service', () => {
-    const lambdaUrl = `${BASE_URL}/lambda`;
-
     group('Create Function', () => {
-      const res = jsonApiRequest(lambdaUrl, 'AWSLambda_20150331.CreateFunction', {
+      const res = lambdaRequest('POST', '', {
         FunctionName: lambdaFunctionName,
         Runtime: 'nodejs18.x',
         Role: 'arn:aws:iam::000000000000:role/test-role',
         Handler: 'index.handler',
-        Code: { ZipFile: 'UEsDBBQAAAAIAA==' }, // Minimal valid zip
+        Code: { ZipFile: EMPTY_ZIP },
       });
       checkSuccess(res, 'Lambda:CreateFunction');
     });
 
     group('Get Function', () => {
-      const res = jsonApiRequest(lambdaUrl, 'AWSLambda_20150331.GetFunction', {
-        FunctionName: lambdaFunctionName,
-      });
+      const res = lambdaRequest('GET', `/${lambdaFunctionName}`);
       checkSuccess(res, 'Lambda:GetFunction');
     });
   });
@@ -482,9 +500,7 @@ export default function () {
 
       // Lambda
       group('Delete Function', () => {
-        jsonApiRequest(`${BASE_URL}/lambda`, 'AWSLambda_20150331.DeleteFunction', {
-          FunctionName: lambdaFunctionName,
-        });
+        lambdaRequest('DELETE', `/${lambdaFunctionName}`);
       });
 
       // KMS (schedule deletion)

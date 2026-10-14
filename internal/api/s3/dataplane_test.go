@@ -111,7 +111,7 @@ func tempObjectRoot(t *testing.T) string {
 //
 
 func TestPutAndGetObject(t *testing.T) {
-	root := tempObjectRoot(t)
+	tempObjectRoot(t)
 
 	store := NewMockStore()
 
@@ -139,10 +139,9 @@ func TestPutAndGetObject(t *testing.T) {
 		t.Fatalf("ETag missing")
 	}
 
-	// Verify file exists
-	path := filepath.Join(root, "ns1", "mybucket", "hello.txt")
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("file not written: %v", err)
+	// Verify the bytes were stored
+	if got, err := h.ReadObject("ns1", "mybucket", "hello.txt"); err != nil || string(got) != "hello world" {
+		t.Fatalf("object not stored: %q %v", got, err)
 	}
 
 	// GET object
@@ -211,10 +210,8 @@ func TestDeleteObject(t *testing.T) {
 	rec, req := newCtx("PUT", "/b1/a/b/c.txt", body)
 	h.PutObject(rec, req)
 
-	path := filepath.Join(root, "ns1", "b1", "a", "b", "c.txt")
-
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("file not created")
+	if _, err := h.ReadObject("ns1", "b1", "a/b/c.txt"); err != nil {
+		t.Fatalf("object not created: %v", err)
 	}
 
 	// DELETE
@@ -225,9 +222,12 @@ func TestDeleteObject(t *testing.T) {
 		t.Fatalf("expected 204, got %d", rec2.Code)
 	}
 
-	// File removed?
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("file still exists after DELETE")
+	// Object gone, blob file included?
+	if _, err := h.ReadObject("ns1", "b1", "a/b/c.txt"); !os.IsNotExist(err) {
+		t.Fatalf("object still exists after DELETE: %v", err)
+	}
+	if n := countBlobs(t, root); n != 0 {
+		t.Fatalf("%d blob files left after DELETE", n)
 	}
 }
 
@@ -269,7 +269,7 @@ func TestNoSuchKey(t *testing.T) {
 }
 
 func TestBinaryUpload(t *testing.T) {
-	root := tempObjectRoot(t)
+	tempObjectRoot(t)
 
 	store := NewMockStore()
 	store.Create(&resource.Resource{
@@ -291,8 +291,7 @@ func TestBinaryUpload(t *testing.T) {
 	}
 
 	// Verify file contents exactly
-	path := filepath.Join(root, "ns1", "binbucket", "file.bin")
-	got, _ := os.ReadFile(path)
+	got, _ := h.ReadObject("ns1", "binbucket", "file.bin")
 
 	if !bytes.Equal(got, body) {
 		t.Fatalf("binary mismatch: got %v want %v", got, body)
@@ -339,5 +338,196 @@ func TestObjectResponsesCarryLastModified(t *testing.T) {
 				t.Fatalf("Last-Modified is not an HTTP date: %q", lm)
 			}
 		})
+	}
+}
+
+func countBlobs(t *testing.T, root string) int {
+	t.Helper()
+	n := 0
+	filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			n++
+		}
+		return nil
+	})
+	return n
+}
+
+func newBucket(t *testing.T, store *MockStore, name string) {
+	t.Helper()
+	store.Create(&resource.Resource{ID: name, Namespace: "ns1", Service: "s3", Type: "bucket"})
+}
+
+// The state backend rewrites the same key on every apply.
+func TestPutObjectOverwrite(t *testing.T) {
+	root := tempObjectRoot(t)
+	store := NewMockStore()
+	newBucket(t, store, "state")
+	h := s3.NewHandler(store)
+
+	for _, body := range []string{`{"serial":1}`, `{"serial":2,"longer":true}`} {
+		rec, req := newCtx("PUT", "/state/env/terraform.tfstate", []byte(body))
+		req.Header.Set("Content-Type", "application/json")
+		h.PutObject(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+
+	rec, req := newCtx("GET", "/state/env/terraform.tfstate", nil)
+	h.GetObject(rec, req)
+	if rec.Body.String() != `{"serial":2,"longer":true}` {
+		t.Fatalf("stale body: %s", rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Length"); got != "26" {
+		t.Fatalf("stale Content-Length %s", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type %q, want the one the client sent", got)
+	}
+	if n := countBlobs(t, root); n != 1 {
+		t.Fatalf("expected the old blob to be removed, found %d", n)
+	}
+}
+
+// OpenTofu's use_lockfile takes the lock with a create-only conditional put.
+func TestPutObjectConditional(t *testing.T) {
+	tempObjectRoot(t)
+	store := NewMockStore()
+	newBucket(t, store, "state")
+	h := s3.NewHandler(store)
+
+	put := func(hdr, val, body string) *httptest.ResponseRecorder {
+		rec, req := newCtx("PUT", "/state/terraform.tfstate.tflock", []byte(body))
+		if hdr != "" {
+			req.Header.Set(hdr, val)
+		}
+		h.PutObject(rec, req)
+		return rec
+	}
+
+	if rec := put("If-None-Match", "*", "lock-a"); rec.Code != 200 {
+		t.Fatalf("first lock: %d", rec.Code)
+	}
+	if rec := put("If-None-Match", "*", "lock-b"); rec.Code != 412 || !strings.Contains(rec.Body.String(), "PreconditionFailed") {
+		t.Fatalf("second lock should fail: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, _ := h.ReadObject("ns1", "state", "terraform.tfstate.tflock"); string(got) != "lock-a" {
+		t.Fatalf("lock overwritten: %s", got)
+	}
+
+	if rec := put("If-Match", `"nope"`, "x"); rec.Code != 412 {
+		t.Fatalf("If-Match mismatch: %d", rec.Code)
+	}
+	etag := put("", "", "v2").Header().Get("ETag")
+	if rec := put("If-Match", etag, "v3"); rec.Code != 200 {
+		t.Fatalf("If-Match with the current ETag: %d", rec.Code)
+	}
+
+	// Unlock, then the lock can be taken again.
+	rec, req := newCtx("DELETE", "/state/terraform.tfstate.tflock", nil)
+	h.DeleteObject(rec, req)
+	if rec := put("If-None-Match", "*", "lock-c"); rec.Code != 200 {
+		t.Fatalf("relock: %d", rec.Code)
+	}
+}
+
+// SDKs stream uploads with aws-chunked framing over TLS.
+func TestPutObjectAWSChunked(t *testing.T) {
+	tempObjectRoot(t)
+	store := NewMockStore()
+	newBucket(t, store, "b")
+	h := s3.NewHandler(store)
+
+	for name, tc := range map[string]struct{ body, sha string }{
+		"signed": {"5;chunk-signature=abc\r\nhello\r\n6;chunk-signature=def\r\n world\r\n0;chunk-signature=fff\r\n\r\n",
+			"STREAMING-AWS4-HMAC-SHA256-PAYLOAD"},
+		"unsigned trailer": {"b\r\nhello world\r\n0\r\nx-amz-checksum-crc32:DUoRhQ==\r\n\r\n",
+			"STREAMING-UNSIGNED-PAYLOAD-TRAILER"},
+	} {
+		rec, req := newCtx("PUT", "/b/"+strings.ReplaceAll(name, " ", "-"), []byte(tc.body))
+		req.Header.Set("X-Amz-Content-Sha256", tc.sha)
+		req.Header.Set("Content-Encoding", "aws-chunked")
+		req.Header.Set("X-Amz-Decoded-Content-Length", "11")
+		h.PutObject(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("%s: %d %s", name, rec.Code, rec.Body.String())
+		}
+		got, _ := h.ReadObject("ns1", "b", strings.ReplaceAll(name, " ", "-"))
+		if string(got) != "hello world" {
+			t.Fatalf("%s: decoded %q", name, got)
+		}
+
+		rec, req = newCtx("HEAD", "/b/"+strings.ReplaceAll(name, " ", "-"), nil)
+		h.HeadObject(rec, req)
+		if ce := rec.Header().Get("Content-Encoding"); ce != "" {
+			t.Fatalf("%s: aws-chunked leaked into Content-Encoding: %q", name, ce)
+		}
+	}
+}
+
+// A key can't climb out of the namespace's directory into someone else's.
+func TestPutObjectKeyTraversal(t *testing.T) {
+	root := tempObjectRoot(t)
+	store := NewMockStore()
+	newBucket(t, store, "b")
+	h := s3.NewHandler(store)
+
+	rec, req := newCtx("PUT", "/b/../../victim/b/secret", []byte("pwned"))
+	h.PutObject(rec, req)
+
+	nsDir := s3.NamespaceDir("ns1")
+	filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() && !strings.HasPrefix(p, nsDir+string(os.PathSeparator)) {
+			t.Fatalf("object written outside the namespace directory: %s", p)
+		}
+		return nil
+	})
+}
+
+func TestGetObjectRange(t *testing.T) {
+	tempObjectRoot(t)
+	store := NewMockStore()
+	newBucket(t, store, "b")
+	h := s3.NewHandler(store)
+
+	rec, req := newCtx("PUT", "/b/k", []byte("0123456789"))
+	h.PutObject(rec, req)
+
+	rec, req = newCtx("GET", "/b/k", nil)
+	req.Header.Set("Range", "bytes=2-4")
+	h.GetObject(rec, req)
+	if rec.Code != 206 || rec.Body.String() != "234" {
+		t.Fatalf("range: %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestDeleteBucketNotEmpty(t *testing.T) {
+	tempObjectRoot(t)
+	store := NewMockStore()
+	newBucket(t, store, "b")
+	h := s3.NewHandler(store)
+
+	rec, req := newCtx("PUT", "/b/k", []byte("x"))
+	h.PutObject(rec, req)
+
+	rec, req = newCtx("DELETE", "/b", nil)
+	h.DeleteBucket(rec, req)
+	if rec.Code != 409 || !strings.Contains(rec.Body.String(), "BucketNotEmpty") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec, req = newCtx("DELETE", "/b/k", nil)
+	h.DeleteObject(rec, req)
+	rec, req = newCtx("DELETE", "/b", nil)
+	h.DeleteBucket(rec, req)
+	if rec.Code != 204 {
+		t.Fatalf("delete emptied bucket: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec, req = newCtx("DELETE", "/b", nil)
+	h.DeleteBucket(rec, req)
+	if rec.Code != 404 {
+		t.Fatalf("delete missing bucket: %d", rec.Code)
 	}
 }

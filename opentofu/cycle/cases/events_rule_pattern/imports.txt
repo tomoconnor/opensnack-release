@@ -1,0 +1,1 @@
+aws_cloudwatch_event_target.to_queue {event_bus_name}/{rule}/{target_id}

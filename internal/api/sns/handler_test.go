@@ -129,7 +129,7 @@ func TestListTopics(t *testing.T) {
 		})
 		store.Create(&resource.Resource{
 			ID:         name,
-			Namespace:  "ns1",
+			Namespace:  "ns1@us-east-1",
 			Service:    "sns",
 			Type:       "topic",
 			Attributes: buf,
@@ -156,7 +156,7 @@ func TestDeleteTopic(t *testing.T) {
 	buf, _ := json.Marshal(map[string]any{"name": name})
 	store.Create(&resource.Resource{
 		ID:         name,
-		Namespace:  "ns1",
+		Namespace:  "ns1@us-east-1",
 		Service:    "sns",
 		Type:       "topic",
 		Attributes: buf,
@@ -176,8 +176,11 @@ func TestPublish(t *testing.T) {
 	store := NewMockStore()
 	h := sns.NewHandler(store)
 
-	body := strings.NewReader("Message=hello")
-	rec, req := newCtx("POST", "/sns?Action=Publish", body)
+	rec, req := newCtx("POST", "/sns?Action=CreateTopic", strings.NewReader("Name=pub"))
+	h.Dispatch(rec, req)
+
+	body := strings.NewReader("Message=hello&TopicArn=arn:aws:sns:us-east-1:000000000000:pub")
+	rec, req = newCtx("POST", "/sns?Action=Publish", body)
 
 	h.Dispatch(rec, req)
 

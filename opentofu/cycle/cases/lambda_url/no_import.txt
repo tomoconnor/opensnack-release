@@ -1,0 +1,4 @@
+# filename, source_code_hash, s3_* and publish are arguments the Lambda API
+# never returns, so an imported aws_lambda_function always plans an update
+# (against real AWS too; the provider's own import tests ignore them).
+aws_lambda_function.fn

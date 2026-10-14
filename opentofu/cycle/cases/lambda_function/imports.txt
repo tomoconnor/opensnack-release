@@ -1,0 +1,2 @@
+aws_lambda_alias.live {function_name}/{name}
+aws_lambda_permission.sns {function_name}:{qualifier}/{statement_id}

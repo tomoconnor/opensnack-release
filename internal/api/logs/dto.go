@@ -4,11 +4,6 @@
 
 package logs
 
-// CreateLogGroup request
-type CreateLogGroupRequest struct {
-	LogGroupName string `json:"logGroupName"`
-}
-
 // CreateLogStream request
 type CreateLogStreamRequest struct {
 	LogGroupName  string `json:"logGroupName"`
@@ -27,29 +22,36 @@ type PutLogEventsRequestLogEvent struct {
 	Message   string `json:"message"`
 }
 
-// PutLogEvents response
-type PutLogEventsResponse struct {
-	NextSequenceToken string `json:"nextSequenceToken"`
+// MetricTransformation is stored and returned exactly as the client sent it.
+type MetricTransformation struct {
+	MetricName      string            `json:"metricName"`
+	MetricNamespace string            `json:"metricNamespace"`
+	MetricValue     string            `json:"metricValue"`
+	DefaultValue    *float64          `json:"defaultValue,omitempty"`
+	Dimensions      map[string]string `json:"dimensions,omitempty"`
+	Unit            string            `json:"unit,omitempty"`
 }
 
-// DescribeLogGroups
-type DescribeLogGroupsResponse struct {
-	LogGroups []LogGroupElement `json:"logGroups"`
+// MetricFilter is the DescribeMetricFilters shape, which is also what the
+// store keeps.
+type MetricFilter struct {
+	FilterName             string                 `json:"filterName"`
+	FilterPattern          string                 `json:"filterPattern"`
+	LogGroupName           string                 `json:"logGroupName"`
+	MetricTransformations  []MetricTransformation `json:"metricTransformations"`
+	CreationTime           int64                  `json:"creationTime"`
+	ApplyOnTransformedLogs bool                   `json:"applyOnTransformedLogs"`
 }
 
-type LogGroupElement struct {
-	LogGroupName string `json:"logGroupName"`
-	Arn          string `json:"arn"`
-	CreationTime int64  `json:"creationTime"`
-}
-
-// DescribeLogStreams
-type DescribeLogStreamsResponse struct {
-	LogStreams []LogStreamElement `json:"logStreams"`
-}
-
-type LogStreamElement struct {
-	LogStreamName string `json:"logStreamName"`
-	Arn           string `json:"arn"`
-	CreationTime  int64  `json:"creationTime"`
+// SubscriptionFilter is the DescribeSubscriptionFilters shape.
+type SubscriptionFilter struct {
+	FilterName             string   `json:"filterName"`
+	FilterPattern          string   `json:"filterPattern"`
+	LogGroupName           string   `json:"logGroupName"`
+	DestinationArn         string   `json:"destinationArn"`
+	RoleArn                string   `json:"roleArn,omitempty"`
+	Distribution           string   `json:"distribution"`
+	EmitSystemFields       []string `json:"emitSystemFields,omitempty"`
+	ApplyOnTransformedLogs bool     `json:"applyOnTransformedLogs"`
+	CreationTime           int64    `json:"creationTime"`
 }
