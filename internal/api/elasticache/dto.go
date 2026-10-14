@@ -10,9 +10,7 @@ import (
 )
 
 const (
-	APIVersion         = "2015-02-02"
-	elasticacheRegion  = "us-east-1"
-	elasticacheAccount = "000000000000"
+	APIVersion = "2015-02-02"
 )
 
 // CacheCluster represents an ElastiCache cache cluster

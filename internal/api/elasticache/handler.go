@@ -122,7 +122,7 @@ func (h *Handler) CreateCacheCluster(w http.ResponseWriter, r *http.Request) {
 				Port:    port,
 			},
 			ParameterGroupStatus:     "in-sync",
-			CustomerAvailabilityZone: "us-east-1a",
+			CustomerAvailabilityZone: util.Region(r) + "a",
 		}
 	}
 
@@ -141,7 +141,7 @@ func (h *Handler) CreateCacheCluster(w http.ResponseWriter, r *http.Request) {
 		EngineVersion:              "6.0",
 		CacheClusterStatus:         "available",
 		NumCacheNodes:              numCacheNodes,
-		PreferredAvailabilityZone:  "us-east-1a",
+		PreferredAvailabilityZone:  util.Region(r) + "a",
 		CacheClusterCreateTime:     now,
 		PreferredMaintenanceWindow: "sun:05:00-sun:09:00",
 		CacheSecurityGroups: CacheSecurityGroupMemberships{
@@ -172,7 +172,7 @@ func (h *Handler) CreateCacheCluster(w http.ResponseWriter, r *http.Request) {
 		AuthTokenEnabled:         false,
 		TransitEncryptionEnabled: false,
 		AtRestEncryptionEnabled:  false,
-		ARN:                      "arn:aws:elasticache:" + elasticacheRegion + ":" + elasticacheAccount + ":cluster:" + cacheClusterId,
+		ARN:                      "arn:aws:elasticache:" + util.Region(r) + ":" + util.AccountID(r) + ":cluster:" + cacheClusterId,
 	}
 
 	// Store the cache cluster
