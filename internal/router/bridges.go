@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"time"
 
 	"opensnack/internal/api/apigatewayv2"
 	"opensnack/internal/api/cloudfront"
@@ -17,6 +18,7 @@ import (
 	"opensnack/internal/api/lambda"
 	"opensnack/internal/api/logs"
 	"opensnack/internal/api/s3"
+	"opensnack/internal/api/sts"
 	"opensnack/internal/resource"
 	"opensnack/internal/util"
 )
@@ -117,6 +119,25 @@ func (e eventsLambda) Deliver(ctx context.Context, scope events.Scope, d events.
 		d.TargetArn, d.Payload, true)
 	return err
 }
+
+// stsCredentials gives Lambda functions credentials for their execution
+// role, issued by STS like any AssumeRole session.
+type stsCredentials struct{ h *sts.Handler }
+
+func (s stsCredentials) RoleCredentials(namespace, accountID, roleARN, session string, ttl time.Duration) (*lambda.RoleCredentials, error) {
+	sess, err := s.h.RoleSession(namespace, accountID, roleARN, session, ttl)
+	if err != nil {
+		return nil, err
+	}
+	return &lambda.RoleCredentials{
+		AccessKeyID:     sess.Credential.AccessKeyID,
+		SecretAccessKey: sess.Credential.SecretAccessKey,
+		SessionToken:    sess.SessionToken,
+		Expires:         sess.Expires,
+	}, nil
+}
+
+func (s stsCredentials) Revoke(accessKeyID string) { s.h.Sessions.Revoke(accessKeyID) }
 
 // logsSink writes Lambda's invocation logs to CloudWatch Logs.
 type logsSink struct{ store resource.Store }

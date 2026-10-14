@@ -462,7 +462,16 @@ func (c *dpCall) lambdaProxy() {
 		event = c.eventV1()
 	}
 	payload, _ := json.Marshal(event)
-	out, err := c.h.Invoker.InvokeLambda(c.r.Context(), LambdaInvocation{
+	// The integration timeout (30 s by default) covers the whole call,
+	// cold start included.
+	timeout := 30 * time.Second
+	if ms, ok := c.integ["timeoutInMillis"].(float64); ok && ms > 0 {
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(c.r.Context(), timeout)
+	defer cancel()
+	http.NewResponseController(c.w).SetWriteDeadline(time.Now().Add(timeout + 5*time.Second))
+	out, err := c.h.Invoker.InvokeLambda(ctx, LambdaInvocation{
 		Namespace: c.d.namespace,
 		Region:    c.d.region,
 		AccountID: str(c.d.api, "_accountId"),
@@ -473,6 +482,10 @@ func (c *dpCall) lambdaProxy() {
 		zap.L().Info("apigateway: lambda proxy failed", zap.String("api", str(c.d.api, "apiId")), zap.Error(err))
 		if errors.Is(err, ErrNoInvoker) {
 			dpError(c.w, http.StatusBadGateway, "Bad Gateway")
+			return
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			dpError(c.w, http.StatusGatewayTimeout, "Service Unavailable")
 			return
 		}
 		dpError(c.w, http.StatusInternalServerError, "Internal Server Error")

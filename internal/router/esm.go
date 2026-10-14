@@ -56,6 +56,9 @@ func arnRegionAccount(arn string) (region, account, resourcePart string) {
 // event, and deletes what succeeded. A failed batch is left to reappear
 // after the visibility timeout, so retries and redrive to a DLQ behave as in
 // AWS. ReportBatchItemFailures is honoured.
+//
+// Each mapping is worked in its own goroutine, one batch at a time, so a
+// function's cold start or long run holds up only its own mapping.
 type ESMPoller struct {
 	insp     resource.Inspector
 	lambda   *lambda.Handler
@@ -64,10 +67,13 @@ type ESMPoller struct {
 
 	stop chan struct{}
 	done sync.WaitGroup
+
+	mu       sync.Mutex
+	inFlight map[string]bool
 }
 
 func newESMPoller(insp resource.Inspector, l *lambda.Handler, sqs http.Handler) *ESMPoller {
-	return &ESMPoller{insp: insp, lambda: l, sqs: sqs, interval: time.Second}
+	return &ESMPoller{insp: insp, lambda: l, sqs: sqs, interval: time.Second, inFlight: map[string]bool{}}
 }
 
 func (p *ESMPoller) Start() {
@@ -82,7 +88,7 @@ func (p *ESMPoller) Start() {
 			case <-p.stop:
 				return
 			case <-t.C:
-				p.Poll(context.Background())
+				p.poll(context.Background(), false)
 			}
 		}
 	}()
@@ -96,8 +102,14 @@ func (p *ESMPoller) Stop() {
 }
 
 // Poll makes one pass over every enabled SQS mapping, in every namespace,
-// and returns how many messages it handed to functions.
+// waits for it, and returns how many messages it handed to functions.
 func (p *ESMPoller) Poll(ctx context.Context) int {
+	return p.poll(ctx, true)
+}
+
+// poll starts a batch for each enabled mapping that hasn't one in flight;
+// with wait, it waits for them and counts the messages.
+func (p *ESMPoller) poll(ctx context.Context, wait bool) int {
 	rows, err := p.insp.Find(resource.Filter{Service: "lambda", Type: "event-source-mapping"})
 	if err != nil {
 		return 0
@@ -106,6 +118,8 @@ func (p *ESMPoller) Poll(ctx context.Context) int {
 	for _, r := range rows {
 		scopes[resource.JoinScope(r.Namespace, r.Region)] = true
 	}
+	var wg sync.WaitGroup
+	var mu sync.Mutex
 	n := 0
 	for scope := range scopes {
 		ns, region := resource.SplitScope(scope)
@@ -113,13 +127,35 @@ func (p *ESMPoller) Poll(ctx context.Context) int {
 			if m.State != "Enabled" || !strings.HasPrefix(m.EventSourceArn, "arn:aws:sqs:") {
 				continue
 			}
-			got, err := p.pollOne(ctx, ns, region, m)
-			if err != nil {
-				zap.L().Info("event source mapping", zap.String("uuid", m.UUID), zap.Error(err))
+			p.mu.Lock()
+			busy := p.inFlight[m.UUID]
+			p.inFlight[m.UUID] = true
+			p.mu.Unlock()
+			if busy {
+				continue
 			}
-			n += got
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer func() {
+					p.mu.Lock()
+					delete(p.inFlight, m.UUID)
+					p.mu.Unlock()
+				}()
+				got, err := p.pollOne(ctx, ns, region, m)
+				if err != nil {
+					zap.L().Info("event source mapping", zap.String("uuid", m.UUID), zap.Error(err))
+				}
+				mu.Lock()
+				n += got
+				mu.Unlock()
+			}()
 		}
 	}
+	if !wait {
+		return 0
+	}
+	wg.Wait()
 	return n
 }
 

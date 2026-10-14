@@ -80,6 +80,9 @@ type Server struct {
 	// ESM polls SQS for Lambda event source mappings. Like Scheduler, the
 	// caller starts and stops it, and it is nil without an Inspector.
 	ESM *ESMPoller
+	// Lambda is the Lambda handler; the caller starts and stops its
+	// executor's background work (Start, Stop).
+	Lambda *lambda.Handler
 }
 
 // New builds the router in dev mode: every request is accepted and the
@@ -115,6 +118,7 @@ func NewServer(store resource.Store, cfg Config) *Server {
 	iamh := iam.NewHandler(store)
 	logsh := logs.NewHandler(store)
 	lambdah := lambda.NewHandler(store)
+	lambdah.SetCredentials(stsCredentials{stsh})
 	snsh.RegisterDeliverer("lambda", snsLambda{lambdaInvoker{lambdah}})
 	s3ctl := s3control.NewHandler(store)
 	dynamoh := dynamodb.NewHandler(store)
@@ -308,6 +312,7 @@ func NewServer(store resource.Store, cfg Config) *Server {
 				logs.NamespaceCleaner(store),
 				cloudwatch.EngineFor(store).DeleteNamespace,
 				sqsh.DeleteNamespaceMessages,
+				lambdah.RetireNamespace,
 			},
 			Routes: map[string]http.HandlerFunc{
 				"GET namespaces/{ns}/ec2/reachability": ec2h.ReachabilityHandler,
@@ -523,7 +528,7 @@ func NewServer(store resource.Store, cfg Config) *Server {
 
 	// S3 routes are handled by rootHandler above
 
-	srv := &Server{Handler: handler, Events: eventsh}
+	srv := &Server{Handler: handler, Events: eventsh, Lambda: lambdah}
 	if insp != nil {
 		srv.Scheduler = events.NewScheduler(eventsh, insp)
 		srv.Scheduler.Now = cfg.Clock

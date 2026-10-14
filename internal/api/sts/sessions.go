@@ -48,6 +48,13 @@ func (s *Sessions) add(sess *Session) {
 	s.m[sess.Credential.AccessKeyID] = sess
 }
 
+// Revoke forgets a session before it expires.
+func (s *Sessions) Revoke(accessKeyID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.m, accessKeyID)
+}
+
 // Get returns the live session for an access key, if there is one.
 func (s *Sessions) Get(accessKeyID string) *Session {
 	if s == nil || accessKeyID == "" {

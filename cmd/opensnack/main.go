@@ -53,6 +53,9 @@ func main() {
 	if app.ESM != nil {
 		app.ESM.Start()
 	}
+	if err := app.Lambda.Start(); err != nil {
+		zap.L().Fatal("lambda executor", zap.Error(err))
+	}
 
 	addr := os.Getenv("OPENSNACK_LISTEN_ADDR")
 	if addr == "" {
@@ -89,5 +92,5 @@ func main() {
 	if app.ESM != nil {
 		app.ESM.Stop()
 	}
-
+	app.Lambda.Stop()
 }
