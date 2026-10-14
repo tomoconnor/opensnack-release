@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"opensnack/internal/api/sts"
+	"opensnack/internal/resource"
+	"opensnack/internal/util"
 )
 
 func newCtx(method, target string) (*httptest.ResponseRecorder, *http.Request) {
@@ -20,7 +22,7 @@ func newCtx(method, target string) (*httptest.ResponseRecorder, *http.Request) {
 }
 
 func TestGetCallerIdentity(t *testing.T) {
-	h := sts.NewHandler()
+	h := sts.NewHandler(resource.NewMemStore(), nil)
 
 	rec, req := newCtx("POST", "/sts?Action=GetCallerIdentity")
 
@@ -39,7 +41,29 @@ func TestGetCallerIdentity(t *testing.T) {
 		t.Fatalf("wrong account: %s", resp.GetCallerIdentityResult.Account)
 	}
 
-	if !strings.Contains(rec.Body.String(), "<Arn>arn:aws:iam::000000000000:user/opensnack</Arn>") {
+	if !strings.Contains(rec.Body.String(), "<Arn>arn:aws:iam::000000000000:user/default</Arn>") {
 		t.Fatalf("bad Arn: %s", rec.Body.String())
+	}
+}
+
+// Each tenant sees their own account and identity.
+func TestGetCallerIdentity_PerTenant(t *testing.T) {
+	h := sts.NewHandler(resource.NewMemStore(), nil)
+	rec, req := newCtx("POST", "/?Action=GetCallerIdentity")
+	req = req.WithContext(util.WithIdentity(req.Context(), &util.Identity{
+		AccessKeyID: "AKIATENANT", Namespace: "tenant-7", AccountID: "123456789012", Region: "eu-west-2",
+	}))
+
+	h.Dispatch(rec, req)
+
+	body := rec.Body.String()
+	for _, want := range []string{
+		"<Account>123456789012</Account>",
+		"<Arn>arn:aws:iam::123456789012:user/tenant-7</Arn>",
+		"<UserId>tenant-7</UserId>",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("missing %s in %s", want, body)
+		}
 	}
 }
