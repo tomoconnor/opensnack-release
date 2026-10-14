@@ -5,14 +5,11 @@
 package lambda
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"os"
@@ -22,6 +19,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"opensnack/internal/unzip"
 )
 
 // LocalExecutor runs functions as ordinary child processes of opensnack:
@@ -120,7 +119,7 @@ func (e *LocalExecutor) Invoke(ctx context.Context, inv *Invocation) (*Invocatio
 	if err != nil {
 		return nil, err
 	}
-	if err := unzipTo(code, paths.TaskRoot); err != nil {
+	if err := unzip.Extract(code, paths.TaskRoot, maxUnzipped); err != nil {
 		return functionError("Runtime.UnzipError", "Could not unzip the deployment package: "+err.Error()), nil
 	}
 	bootPath := filepath.Join(paths.RuntimeDir, bootName)
@@ -245,55 +244,6 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
-}
-
-// unzipTo extracts a deployment package, refusing entries that would land
-// outside dir and packages that unpack too large.
-func unzipTo(code []byte, dir string) error {
-	zr, err := zip.NewReader(bytes.NewReader(code), int64(len(code)))
-	if err != nil {
-		return err
-	}
-	var total int64
-	for _, f := range zr.File {
-		name := filepath.Clean(filepath.FromSlash(f.Name))
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("illegal path in archive: %s", f.Name)
-		}
-		dst := filepath.Join(dir, name)
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(dst, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if f.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlinks are not supported: %s", f.Name)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		mode := f.Mode().Perm() | 0o600
-		w, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		n, err := io.Copy(w, io.LimitReader(rc, maxUnzipped-total+1))
-		rc.Close()
-		w.Close()
-		if err != nil {
-			return err
-		}
-		if total += n; total > maxUnzipped {
-			return errors.New("unzipped size must be smaller than 262144000 bytes")
-		}
-	}
-	return nil
 }
 
 func splitLines(s string) []string {

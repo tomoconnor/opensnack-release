@@ -1,0 +1,5 @@
+.git
+.claude
+tmp
+opensnack.log*
+*.test
