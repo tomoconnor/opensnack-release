@@ -80,7 +80,7 @@ spec:
             - { name: OPENSNACK_LAMBDA_EXECUTOR, value: kubernetes }
             - { name: OPENSNACK_LAMBDA_K8S_NAMESPACE, value: opensnack-lambda }
             - { name: OPENSNACK_LAMBDA_K8S_SERVICE_ACCOUNT, value: opensnack-lambda }
-            # A sandboxing RuntimeClass (Kata Containers, gVisor...). Empty
+            # A sandboxing RuntimeClass (a microVM or user-space kernel). Empty
             # uses the cluster's default runtime: fine for CI, not for
             # untrusted code.
             - { name: OPENSNACK_LAMBDA_K8S_RUNTIME_CLASS, value: "" }
