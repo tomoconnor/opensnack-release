@@ -19,7 +19,8 @@ type AWSHost struct {
 	Region string
 	// Bucket is set for virtual-hosted-style S3 requests.
 	Bucket string
-	// AccountID is set for S3 Control ({account}.s3-control.{region}...).
+	// AccountID is set for S3 Control ({account}.s3-control.{region}...) and
+	// DynamoDB's account endpoints ({account}.ddb.{region}...).
 	AccountID string
 }
 
@@ -47,6 +48,7 @@ func HostSuffixes() []string { return hostSuffixes() }
 //	{bucket}.s3.{region}.amazonaws.com         (also s3.dualstack., s3-{region})
 //	{bucket}.s3.amazonaws.com
 //	{account}.s3-control.{region}.amazonaws.com
+//	{account}.ddb.{region}.amazonaws.com       (DynamoDB account endpoints)
 //
 // It returns false for anything else (localhost, an IP, a bare name).
 func ParseAWSHost(hostport string) (AWSHost, bool) {
@@ -76,6 +78,12 @@ func ParseAWSHost(hostport string) (AWSHost, bool) {
 			Region:    labels[n-1],
 			AccountID: strings.Join(labels[:n-2], "."),
 		}, true
+	}
+
+	// {account}.ddb.{region}: SDKs send DynamoDB calls here when they know
+	// the account, from the credentials or a table ARN.
+	if n == 3 && labels[1] == "ddb" {
+		return AWSHost{Service: "dynamodb", Region: labels[2], AccountID: labels[0]}, true
 	}
 
 	// S3: find the "s3" (or legacy "s3-{region}") label from the right, since

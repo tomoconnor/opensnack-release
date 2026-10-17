@@ -25,6 +25,7 @@ func TestParseAWSHost(t *testing.T) {
 		{"bucket.s3-us-west-2.amazonaws.com", AWSHost{Service: "s3", Region: "us-west-2", Bucket: "bucket"}, true},
 		{"s3.s3.us-east-1.amazonaws.com", AWSHost{Service: "s3", Region: "us-east-1", Bucket: "s3"}, true},
 		{"123456789012.s3-control.us-east-1.amazonaws.com", AWSHost{Service: "s3-control", Region: "us-east-1", AccountID: "123456789012"}, true},
+		{"123456789012.ddb.eu-west-1.amazonaws.com", AWSHost{Service: "dynamodb", Region: "eu-west-1", AccountID: "123456789012"}, true},
 		{"localhost:4566", AWSHost{}, false},
 		{"127.0.0.1", AWSHost{}, false},
 		{"amazonaws.com.evil.example", AWSHost{}, false},

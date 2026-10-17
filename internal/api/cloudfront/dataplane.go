@@ -493,6 +493,9 @@ func (e *edge) fetchLoopback(lh http.Handler, o *node, domain, p, query string) 
 		return plainError(http.StatusBadGateway, "CloudFront wasn't able to connect to the origin.")
 	}
 	req.Host = domain
+	if req.Body == nil {
+		req.Body = http.NoBody // handlers read it, as a server's request always has one
+	}
 	rec := &recorder{header: http.Header{}}
 	lh.ServeHTTP(rec, req)
 	if rec.status == 0 {
