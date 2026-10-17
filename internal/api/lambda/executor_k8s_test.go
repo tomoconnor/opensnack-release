@@ -849,3 +849,18 @@ func TestK8sRescaleAfterDeath(t *testing.T) {
 		t.Fatalf("after the pod died: %s, %d pods", res.Payload, h.podCount())
 	}
 }
+
+// The guest overhead goes on the pod's memory; the CPU share still follows
+// the function's MemorySize.
+func TestK8sGuestOverhead(t *testing.T) {
+	h := newHarness(t, func(c *KubernetesConfig) { c.GuestOverheadMB = 128 })
+	inv := testInvocation("roomy-fn", `{"echo":1}`)
+	inv.MemoryMB = 1769
+	h.invoke(inv)
+	h.mu.Lock()
+	c := h.created[0].Spec.Containers[0]
+	h.mu.Unlock()
+	if c.Resources.Limits["memory"] != "1897Mi" || c.Resources.Requests["memory"] != "1897Mi" || c.Resources.Limits["cpu"] != "1000m" {
+		t.Errorf("resources: %+v", c.Resources)
+	}
+}

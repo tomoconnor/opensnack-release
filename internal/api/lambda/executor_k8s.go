@@ -79,6 +79,11 @@ type KubernetesConfig struct {
 	TaskSize string
 	// MaxProcs is the sandbox's process (and thread) limit.
 	MaxProcs int
+	// GuestOverheadMB is added to a pod's memory on top of the function's
+	// MemorySize. A microVM runtime that sizes the guest from the pod
+	// (Kata's static_sandbox_resource_mgmt) spends part of it on the guest
+	// kernel and agent, which would otherwise come out of the function's.
+	GuestOverheadMB int
 	// MBPerVCPU sets the CPU limit in proportion to memory: Lambda gives a
 	// full vCPU at 1769 MB. MinCPUMillis is a floor.
 	MBPerVCPU    int
@@ -226,6 +231,7 @@ func KubernetesConfigFromEnv() (KubernetesConfig, error) {
 	}
 	cfg.MaxPods = int(num("OPENSNACK_LAMBDA_K8S_MAX_PODS", 20))
 	cfg.MaxProcs = int(num("OPENSNACK_LAMBDA_K8S_MAX_PROCS", 1024))
+	cfg.GuestOverheadMB = int(num("OPENSNACK_LAMBDA_K8S_GUEST_OVERHEAD_MB", 0))
 	cfg.MBPerVCPU = int(num("OPENSNACK_LAMBDA_K8S_MB_PER_VCPU", 1769))
 	cfg.MinCPUMillis = int(num("OPENSNACK_LAMBDA_K8S_MIN_CPU_MILLIS", 0))
 	cfg.UIDBase = num("OPENSNACK_LAMBDA_K8S_UID_BASE", 100000)
@@ -248,6 +254,8 @@ func (cfg *KubernetesConfig) validate() error {
 		return errors.New("set OPENSNACK_LAMBDA_K8S_IMAGE_PYTHON and/or OPENSNACK_LAMBDA_K8S_IMAGE_NODEJS")
 	case cfg.MaxPods < 1:
 		return errors.New("OPENSNACK_LAMBDA_K8S_MAX_PODS must be at least 1")
+	case cfg.GuestOverheadMB < 0:
+		return errors.New("OPENSNACK_LAMBDA_K8S_GUEST_OVERHEAD_MB can't be negative")
 	case cfg.MBPerVCPU < 1:
 		return errors.New("OPENSNACK_LAMBDA_K8S_MB_PER_VCPU must be at least 1")
 	case cfg.UIDBase < 1 || cfg.UIDCount < 1:
@@ -631,7 +639,7 @@ func (e *KubernetesExecutor) cpuMillis(memoryMB int) int {
 func (e *KubernetesExecutor) podSpec(inv *Invocation, sb *sandbox, family, image string) *kube.Pod {
 	pi := sb.tag.(*podInfo)
 	uid := e.cfg.UIDBase + rand.Int64N(e.cfg.UIDCount)
-	mem := strconv.Itoa(inv.MemoryMB) + "Mi"
+	mem := strconv.Itoa(inv.MemoryMB+e.cfg.GuestOverheadMB) + "Mi"
 	cpu := strconv.Itoa(e.cpuMillis(inv.MemoryMB)) + "m"
 	resources := map[string]string{"memory": mem, "cpu": cpu}
 	seccomp := &kube.SeccompProfile{Type: "RuntimeDefault"}
