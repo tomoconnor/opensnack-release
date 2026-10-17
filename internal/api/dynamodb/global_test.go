@@ -5,6 +5,7 @@
 package dynamodb_test
 
 import (
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -105,4 +106,22 @@ func TestReplicaNeedsNewAndOldImages(t *testing.T) {
 		`"StreamSpecification":{"StreamEnabled":true,"StreamViewType":"KEYS_ONLY"},"BillingMode"`, 1))
 	c.fails("UpdateTable", `{"TableName":"route","ReplicaUpdates":[{"Create":{"RegionName":"eu-west-1"}}]}`, "ValidationException")
 	c.in("eu-west-1").ok("CreateTable", routeTable)
+}
+
+// SDKs send calls that name an account (a table ARN, or credentials that
+// carry one) to {account}.ddb.{region}.amazonaws.com.
+func TestAccountEndpoint(t *testing.T) {
+	c := newClient(t)
+	c.ok("CreateTable", routeTable)
+	arn := c.ok("DescribeTable", `{"TableName":"route"}`)["Table"].(map[string]any)["TableArn"].(string)
+	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"ResourceArn":"`+arn+`"}`))
+	req.Host = "000000000000.ddb.us-east-1.amazonaws.com"
+	req.Header.Set("X-Amz-Target", "DynamoDB_20120810.ListTagsOfResource")
+	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+	req.Header.Set("User-Agent", "aws-sdk-go-v2 custom-"+c.ns)
+	rec := httptest.NewRecorder()
+	c.h.ServeHTTP(rec, req)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"Tags"`) {
+		t.Fatalf("account endpoint: %d %s", rec.Code, rec.Body.String())
+	}
 }
