@@ -43,7 +43,7 @@ func (h *Handler) bucketRoutes() bucketRoutes {
 		},
 		http.MethodPut: {
 			"versioning":        h.PutBucketVersioning,
-			"lifecycle":         lockedBucket(h.PutBucketLifecycleConfiguration),
+			"lifecycle":         h.PutBucketLifecycleConfiguration,
 			"acl":               lockedBucket(h.PutBucketAcl),
 			"policy":            lockedBucket(h.PutBucketPolicy),
 			"tagging":           h.PutBucketTagging,
@@ -52,6 +52,7 @@ func (h *Handler) bucketRoutes() bucketRoutes {
 			"ownershipControls": h.PutBucketOwnershipControls,
 			"cors":              h.PutBucketCors,
 			"website":           h.PutBucketWebsite,
+			"replication":       h.PutBucketReplication,
 		},
 		http.MethodDelete: {
 			"lifecycle":         h.DeleteBucketLifecycle,
@@ -62,6 +63,7 @@ func (h *Handler) bucketRoutes() bucketRoutes {
 			"ownershipControls": h.DeleteBucketOwnershipControls,
 			"cors":              h.DeleteBucketCors,
 			"website":           h.DeleteBucketWebsite,
+			"replication":       h.DeleteBucketReplication,
 		},
 		http.MethodPost: {
 			"delete": h.DeleteObjects,

@@ -20,6 +20,8 @@ type client struct {
 	h     http.Handler
 	ns    string
 	store *resource.MemStore
+	// region is the one requests are sent to; us-east-1 when empty.
+	region string
 }
 
 func newClient(t *testing.T) *client {
@@ -32,7 +34,11 @@ func newClient(t *testing.T) *client {
 func (c *client) call(op, body string) (int, map[string]any) {
 	c.t.Helper()
 	req := httptest.NewRequest("POST", "/", strings.NewReader(body))
-	req.Host = "dynamodb.us-east-1.amazonaws.com"
+	region := c.region
+	if region == "" {
+		region = "us-east-1"
+	}
+	req.Host = "dynamodb." + region + ".amazonaws.com"
 	req.Header.Set("X-Amz-Target", "DynamoDB_20120810."+op)
 	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
 	req.Header.Set("User-Agent", "aws-sdk-go-v2 custom-"+c.ns)

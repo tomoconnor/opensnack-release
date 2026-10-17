@@ -153,8 +153,10 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Copying an older version onto its own key is how a version is
+	// restored, so only a copy of the current version counts as a self-copy.
 	replaceMeta := strings.EqualFold(r.Header.Get("X-Amz-Metadata-Directive"), "REPLACE")
-	if srcBucket == bucket && srcKey == key && !replaceMeta &&
+	if srcBucket == bucket && srcKey == key && src.current && !replaceMeta &&
 		r.Header.Get("X-Amz-Server-Side-Encryption") == "" &&
 		r.Header.Get("X-Amz-Storage-Class") == "" &&
 		r.Header.Get("X-Amz-Website-Redirect-Location") == "" {
@@ -176,7 +178,7 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		meta.ContentType = src.ContentType
 		meta.UserMetadata = src.UserMetadata
 		for k, v := range src.Headers {
-			if !strings.HasPrefix(k, "X-Amz-Server-Side-Encryption") && k != "X-Amz-Storage-Class" {
+			if !strings.HasPrefix(k, "X-Amz-Server-Side-Encryption") && k != "X-Amz-Storage-Class" && k != replicationStatusHeader {
 				meta.Headers[k] = v
 			}
 		}
@@ -191,6 +193,7 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		meta.Tags = src.Tags
 	}
 	applyDefaultEncryption(meta.Headers, bmeta, r)
+	rule := h.prepareReplication(ns, bmeta, &meta)
 
 	blob, err := writeBlob(ns, body)
 	if err != nil {
@@ -203,6 +206,7 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 		writeS3Error(w, http.StatusInternalServerError, "InternalError", err.Error(), "")
 		return
 	}
+	h.replicateObject(ns, rule, &meta)
 
 	writeWriteHeaders(w, &meta)
 	if src.VersionID != "" {
@@ -272,7 +276,10 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 		if o.VersionID != "" {
 			res, err = h.deleteVersion(ns, bmeta.Name, o.Key, o.VersionID)
 		} else {
-			res, err = h.deleteKey(ns, bmeta.Versioning, bmeta.Name, o.Key)
+			res, err = h.deleteKey(ns, bmeta.Versioning, bmeta.Name, o.Key, "")
+			if err == nil {
+				h.replicateDeleteMarker(ns, bmeta, o.Key, res)
+			}
 		}
 		if err != nil {
 			out.Errors = append(out.Errors, DeleteError{

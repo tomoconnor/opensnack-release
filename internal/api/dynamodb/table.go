@@ -46,6 +46,8 @@ type tableRecord struct {
 	PITR                 bool                    `json:"pitr"`
 	PITRDays             int32                   `json:"pitr_days,omitempty"`
 	Tags                 []Tag                   `json:"tags,omitempty"`
+	// Replicas are the regions of a global table's other copies.
+	Replicas []string `json:"replicas,omitempty"`
 }
 
 type indexRecord struct {
@@ -189,6 +191,10 @@ func (h *Handler) describe(ns string, t *tableRecord, status string) TableDescri
 		TableSizeBytes:            size,
 		TableStatus:               status,
 		WarmThroughput:            warmDesc(t.Warm),
+	}
+	if len(t.Replicas) > 0 {
+		d.GlobalTableVersion = globalTableVersion
+		d.Replicas = h.replicaDescriptions(ns, t)
 	}
 	if t.Stream != nil && t.Stream.StreamEnabled {
 		d.StreamSpecification = t.Stream
@@ -535,23 +541,32 @@ func (h *Handler) deleteTable(r *http.Request, body []byte) (any, error) {
 		return nil, validationErr("Resource cannot be deleted as it is currently protected against deletion. Disable deletion protection first.")
 	}
 	desc := h.describe(ns, t, "DELETING")
+	if err := h.dropTable(ns, t); err != nil {
+		return nil, err
+	}
+	// Deleting one copy of a global table leaves the others running.
+	_, own := resource.SplitScope(ns)
+	if err := h.forgetRegion(ns, t, own); err != nil {
+		return nil, err
+	}
+	return map[string]any{"TableDescription": desc}, nil
+}
 
+// dropTable deletes a table and its items from ns.
+func (h *Handler) dropTable(ns string, t *tableRecord) error {
 	res, err := h.Store.List(service, typeItem, ns)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	prefix := t.Name + "/"
 	for _, it := range res {
 		if strings.HasPrefix(it.ID, prefix) {
 			if err := h.Store.Delete(it.ID, service, typeItem, ns); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	if err := h.Store.Delete(t.Name, service, typeTable, ns); err != nil {
-		return nil, err
-	}
-	return map[string]any{"TableDescription": desc}, nil
+	return h.Store.Delete(t.Name, service, typeTable, ns)
 }
 
 func (h *Handler) listTables(r *http.Request, body []byte) (any, error) {
@@ -597,10 +612,6 @@ func (h *Handler) updateTable(r *http.Request, body []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(req.ReplicaUpdates) > 0 {
-		return nil, validationErr("Global table replicas are not supported by this emulator")
-	}
-
 	if req.BillingMode != "" && req.BillingMode != t.BillingMode {
 		switch req.BillingMode {
 		case "PAY_PER_REQUEST":
@@ -655,6 +666,8 @@ func (h *Handler) updateTable(r *http.Request, body []byte) (any, error) {
 		case s.StreamEnabled:
 			t.Stream = s
 			t.StreamLabel = streamLabel()
+		case enabled && len(t.Replicas) > 0:
+			return nil, validationErr("Table stream cannot be disabled while the table has replicas")
 		case enabled:
 			t.Stream = nil
 		default:
@@ -724,6 +737,12 @@ func (h *Handler) updateTable(r *http.Request, body []byte) (any, error) {
 	}
 	t.pruneAttributeDefinitions()
 	if err := checkAttributeDefinitions(t); err != nil {
+		return nil, err
+	}
+	if err := h.syncReplicas(ns, t); err != nil {
+		return nil, err
+	}
+	if err := h.replicaUpdates(r, ns, t, req.ReplicaUpdates); err != nil {
 		return nil, err
 	}
 

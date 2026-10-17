@@ -533,13 +533,6 @@ func (h *Handler) GetBucketLogging(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) GetBucketReplication(w http.ResponseWriter, r *http.Request) {
-	if _, meta, ok := h.bucketOr404(w, r); ok {
-		notConfigured(w, meta.Name, "ReplicationConfigurationNotFoundError",
-			"The replication configuration was not found")
-	}
-}
-
 func (h *Handler) GetObjectLockConfiguration(w http.ResponseWriter, r *http.Request) {
 	if _, meta, ok := h.bucketOr404(w, r); ok {
 		notConfigured(w, meta.Name, "ObjectLockConfigurationNotFoundError",

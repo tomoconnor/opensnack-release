@@ -393,6 +393,7 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	meta.Blob = blob
 	meta.Tags = tags
 	applyDefaultEncryption(meta.Headers, bmeta, r)
+	rule := h.prepareReplication(ns, bmeta, &meta)
 
 	if err := h.storeObject(ns, bmeta.Versioning, &meta, ifNoneMatch == "*"); err != nil {
 		removeBlob(ns, blob)
@@ -405,6 +406,8 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 		writeS3Error(w, 500, "InternalError", err.Error(), "")
 		return
 	}
+
+	h.replicateObject(ns, rule, &meta)
 
 	w.Header().Set("ETag", meta.ETag)
 	writeWriteHeaders(w, &meta)
@@ -620,7 +623,10 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 	if vid := r.URL.Query().Get("versionId"); vid != "" {
 		res, err = h.deleteVersion(ns, bucket, key, vid)
 	} else {
-		res, err = h.deleteKey(ns, bmeta.Versioning, bucket, key)
+		res, err = h.deleteKey(ns, bmeta.Versioning, bucket, key, "")
+		if err == nil {
+			h.replicateDeleteMarker(ns, bmeta, key, res)
+		}
 	}
 	if err != nil {
 		writeS3Error(w, 500, "InternalError", err.Error(), "")

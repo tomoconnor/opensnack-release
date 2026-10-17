@@ -135,6 +135,7 @@ type TableDescription struct {
 	CreationDateTime          float64                           `json:"CreationDateTime"`
 	DeletionProtectionEnabled bool                              `json:"DeletionProtectionEnabled"`
 	GlobalSecondaryIndexes    []GlobalSecondaryIndexDescription `json:"GlobalSecondaryIndexes,omitempty"`
+	GlobalTableVersion        string                            `json:"GlobalTableVersion,omitempty"`
 	ItemCount                 int64                             `json:"ItemCount"`
 	KeySchema                 []KeySchemaElement                `json:"KeySchema"`
 	LatestStreamArn           string                            `json:"LatestStreamArn,omitempty"`
@@ -142,6 +143,7 @@ type TableDescription struct {
 	LocalSecondaryIndexes     []LocalSecondaryIndexDescription  `json:"LocalSecondaryIndexes,omitempty"`
 	OnDemandThroughput        *OnDemandThroughput               `json:"OnDemandThroughput,omitempty"`
 	ProvisionedThroughput     *ProvisionedThroughputDescription `json:"ProvisionedThroughput,omitempty"`
+	Replicas                  []ReplicaDescription              `json:"Replicas,omitempty"`
 	SSEDescription            *SSEDescription                   `json:"SSEDescription,omitempty"`
 	StreamSpecification       *StreamSpecification              `json:"StreamSpecification,omitempty"`
 	TableArn                  string                            `json:"TableArn"`
@@ -182,7 +184,7 @@ type UpdateTableInput struct {
 	OnDemandThroughput          *OnDemandThroughput          `json:"OnDemandThroughput,omitempty"`
 	WarmThroughput              *WarmThroughput              `json:"WarmThroughput,omitempty"`
 	DeletionProtectionEnabled   *bool                        `json:"DeletionProtectionEnabled,omitempty"`
-	ReplicaUpdates              []any                        `json:"ReplicaUpdates,omitempty"`
+	ReplicaUpdates              []ReplicationGroupUpdate     `json:"ReplicaUpdates,omitempty"`
 }
 
 type TimeToLiveDescription struct {

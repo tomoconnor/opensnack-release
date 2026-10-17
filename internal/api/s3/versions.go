@@ -211,7 +211,9 @@ func (h *Handler) storeObject(ns, mode string, m *objectMeta, createOnly bool) e
 	m.Seq = nextSeq(vs)
 	switch mode {
 	case "Enabled":
-		m.VersionID = newVersionID()
+		if m.VersionID == "" { // replicas arrive with their source's ID
+			m.VersionID = newVersionID()
+		}
 	case "Suspended":
 		m.VersionID = "null"
 	default:
@@ -260,8 +262,9 @@ type deleteResult struct {
 }
 
 // deleteKey is DeleteObject without a version ID: it removes the object in
-// an unversioned bucket and adds a delete marker in a versioned one.
-func (h *Handler) deleteKey(ns, mode, bucket, key string) (deleteResult, error) {
+// an unversioned bucket and adds a delete marker in a versioned one. vid is
+// the marker's version ID when it is a replica, otherwise "".
+func (h *Handler) deleteKey(ns, mode, bucket, key, vid string) (deleteResult, error) {
 	defer lockKey(ns, bucket, key)()
 	vs, err := h.keyVersions(ns, bucket, key)
 	if err != nil {
@@ -281,7 +284,10 @@ func (h *Handler) deleteKey(ns, mode, bucket, key string) (deleteResult, error) 
 		VersionID: "null",
 	}
 	if mode == "Enabled" {
-		marker.VersionID = newVersionID()
+		marker.VersionID = vid
+		if vid == "" {
+			marker.VersionID = newVersionID()
+		}
 	}
 	for _, v := range vs {
 		switch {

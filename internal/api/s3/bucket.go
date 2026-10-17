@@ -207,7 +207,15 @@ func (h *Handler) PutBucketVersioning(w http.ResponseWriter, r *http.Request) {
 		malformedXML(w)
 		return
 	}
-	if h.editBucket(w, r, func(m *bucketMeta) bool { m.Versioning = in.Status; return true }) {
+	if h.editBucket(w, r, func(m *bucketMeta) bool {
+		if in.Status == "Suspended" && m.Replication != nil {
+			writeS3Error(w, http.StatusConflict, "InvalidBucketState",
+				"A replication configuration is present on this bucket, so you cannot change the versioning state. To change the versioning state, first delete the replication configuration.", "")
+			return false
+		}
+		m.Versioning = in.Status
+		return true
+	}) {
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -220,15 +228,4 @@ func (h *Handler) GetBucketVersioning(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeXMLOK(w, versioningConfiguration{Xmlns: s3XMLNS, Status: meta.Versioning})
-}
-
-//
-// DELETE BUCKET LIFECYCLE
-// DELETE /:bucket?lifecycle
-//
-
-func (h *Handler) DeleteBucketLifecycle(w http.ResponseWriter, r *http.Request) {
-	if h.editBucket(w, r, func(m *bucketMeta) bool { m.Lifecycle = nil; return true }) {
-		noContent(w)
-	}
 }

@@ -1,0 +1,3 @@
+aws_s3_bucket.home
+aws_s3_bucket.stop
+aws_s3_object.present
