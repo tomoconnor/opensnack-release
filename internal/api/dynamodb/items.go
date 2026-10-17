@@ -326,13 +326,19 @@ func (h *Handler) preparePut(ns string, req *putInput) (*preparedWrite, error) {
 }
 
 func (h *Handler) apply(ns string, w *preparedWrite) error {
-	if w.newItem == nil {
-		if w.old == nil {
-			return nil
-		}
-		return h.removeItem(ns, w.t, w.key)
+	var err error
+	switch {
+	case w.newItem != nil:
+		err = h.storeItem(ns, w.t, w.newItem, w.old != nil)
+	case w.old != nil:
+		err = h.removeItem(ns, w.t, w.key)
+	default:
+		return nil
 	}
-	return h.storeItem(ns, w.t, w.newItem, w.old != nil)
+	if err != nil {
+		return err
+	}
+	return h.replicate(ns, w)
 }
 
 func (h *Handler) putItem(r *http.Request, body []byte) (any, error) {

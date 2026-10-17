@@ -221,6 +221,27 @@ func TestCopyObject(t *testing.T) {
 	e.must(404, e.do("PUT", "/cb/dst3", "", "X-Amz-Copy-Source", "/cb/missing"))
 }
 
+func TestCopyRestoresOlderVersion(t *testing.T) {
+	e := newEnv(t)
+	e.versioned("rv", "Enabled")
+	first := e.must(200, e.do("PUT", "/rv/k", "one")).Header().Get("X-Amz-Version-Id")
+	current := e.must(200, e.do("PUT", "/rv/k", "two")).Header().Get("X-Amz-Version-Id")
+
+	// Copying the current version onto itself is still refused...
+	e.must(400, e.do("PUT", "/rv/k", "", "X-Amz-Copy-Source", "/rv/k?versionId="+current))
+	// ...but copying an older one restores it as a new current version.
+	rec := e.must(200, e.do("PUT", "/rv/k", "", "X-Amz-Copy-Source", "/rv/k?versionId="+first))
+	if rec.Header().Get("X-Amz-Copy-Source-Version-Id") != first {
+		t.Fatalf("copy source version %v", rec.Header())
+	}
+	if got := e.must(200, e.do("GET", "/rv/k", "")).Body.String(); got != "one" {
+		t.Fatalf("restored body %q", got)
+	}
+	if lv := e.versions("rv"); len(lv.Versions) != 3 {
+		t.Fatalf("want 3 versions, got %d", len(lv.Versions))
+	}
+}
+
 func TestDeleteObjectsEmptiesVersionedBucket(t *testing.T) {
 	e := newEnv(t)
 	e.versioned("db", "Enabled")

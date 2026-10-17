@@ -18,17 +18,17 @@ import (
 	"opensnack/internal/util"
 )
 
-// bucketMeta is the bucket row's attributes. The older handlers (lifecycle,
-// ACL, policy, versioning) edit the same JSON as a map, so every key they
-// write has a field here and survives a round trip through this struct.
+// bucketMeta is the bucket row's attributes. The older handlers (ACL, policy,
+// versioning) edit the same JSON as a map, so every key they write has a
+// field here and survives a round trip through this struct.
 type bucketMeta struct {
-	Name         string          `json:"Name"`
-	CreationDate time.Time       `json:"CreationDate"`
-	Region       string          `json:"region,omitempty"`
-	Versioning   string          `json:"versioning,omitempty"`
-	ACL          string          `json:"acl,omitempty"`
-	Policy       string          `json:"policy,omitempty"`
-	Lifecycle    json.RawMessage `json:"lifecycle,omitempty"`
+	Name         string                  `json:"Name"`
+	CreationDate time.Time               `json:"CreationDate"`
+	Region       string                  `json:"region,omitempty"`
+	Versioning   string                  `json:"versioning,omitempty"`
+	ACL          string                  `json:"acl,omitempty"`
+	Policy       string                  `json:"policy,omitempty"`
+	Lifecycle    *LifecycleConfiguration `json:"lifecycle,omitempty"`
 
 	TagSet            []Tag                              `json:"tag_set,omitempty"`
 	Encryption        *ServerSideEncryptionConfiguration `json:"encryption,omitempty"`
@@ -36,6 +36,7 @@ type bucketMeta struct {
 	Ownership         *OwnershipControls                 `json:"ownership_controls,omitempty"`
 	CORS              *CORSConfiguration                 `json:"cors,omitempty"`
 	Website           *WebsiteConfiguration              `json:"website,omitempty"`
+	Replication       *ReplicationConfiguration          `json:"replication,omitempty"`
 }
 
 var errNoSuchBucket = errors.New("no such bucket")
