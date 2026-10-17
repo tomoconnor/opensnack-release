@@ -11,10 +11,18 @@ import "syscall"
 // where pods share a kernel.
 const rlimitNproc = 6
 
-func limitProcesses(n uint64) error {
-	return syscall.Setrlimit(rlimitNproc, &syscall.Rlimit{Cur: n, Max: n})
-}
+func limitProcesses(n uint64) error { return lower(rlimitNproc, n) }
 
-func limitFiles(n uint64) error {
-	return syscall.Setrlimit(syscall.RLIMIT_NOFILE, &syscall.Rlimit{Cur: n, Max: n})
+func limitFiles(n uint64) error { return lower(syscall.RLIMIT_NOFILE, n) }
+
+// lower sets a limit to n, or leaves it where it is when the kernel's is
+// already lower: without privileges a hard limit can only go down, and a
+// small guest's defaults (which scale with its memory) can be under n.
+func lower(resource int, n uint64) error {
+	var cur syscall.Rlimit
+	if err := syscall.Getrlimit(resource, &cur); err != nil {
+		return err
+	}
+	n = min(n, cur.Max)
+	return syscall.Setrlimit(resource, &syscall.Rlimit{Cur: n, Max: n})
 }

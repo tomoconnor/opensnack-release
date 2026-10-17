@@ -5,6 +5,9 @@
 package cloudfront
 
 import (
+	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
@@ -255,5 +258,36 @@ func TestParseHost(t *testing.T) {
 		if got, ok := ParseHost(host); got != want || ok != (want != "") {
 			t.Errorf("ParseHost(%q) = %q, %v", host, got, ok)
 		}
+	}
+}
+
+// An execute-api origin is served in process. The handler reads the body,
+// which a GET's in-process request must still have.
+func TestLoopbackOriginGet(t *testing.T) {
+	h := NewHandler(resource.NewMemStore())
+	h.Loopback = func(host string) http.Handler {
+		if host != "abc123.execute-api.us-east-1.amazonaws.com" {
+			return nil
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, _ := io.ReadAll(r.Body)
+			fmt.Fprintf(w, "%s %s body=%q", r.Method, r.URL.Path, body)
+		})
+	}
+	cfg := strings.NewReplacer(
+		`<DomainName>site.s3.us-east-1.amazonaws.com</DomainName><OriginAccessControlId>OAC</OriginAccessControlId>
+      <S3OriginConfig><OriginAccessIdentity></OriginAccessIdentity></S3OriginConfig>`,
+		`<DomainName>abc123.execute-api.us-east-1.amazonaws.com</DomainName>
+      <CustomOriginConfig><HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort><OriginProtocolPolicy>https-only</OriginProtocolPolicy></CustomOriginConfig>`,
+		"<DefaultRootObject>index.html</DefaultRootObject>", "",
+	).Replace(distConfig)
+	rec := send(h, "POST", "/2020-05-31/distribution", cfg)
+	if rec.Code != 201 {
+		t.Fatalf("create distribution: %d %s", rec.Code, rec.Body.String())
+	}
+	d, _ := parseXML(rec.Body.Bytes())
+	got := view(h, d.text("Id"), "/where")
+	if got.Code != 200 || got.Body.String() != `GET /where body=""` {
+		t.Fatalf("loopback GET: %d %s", got.Code, got.Body.String())
 	}
 }
