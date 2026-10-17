@@ -7,20 +7,23 @@
 package lambda
 
 import (
+	"os"
 	"os/exec"
 	"runtime"
 	"syscall"
 	"time"
 )
 
-// configureProcess puts the function in its own process group, so a
-// timeout kills whatever it spawned too.
+// configureProcess puts the function in its own process group, so
+// killProcess takes whatever it spawned too.
 func configureProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
 	cmd.WaitDelay = 2 * time.Second
+}
+
+// killProcess kills the function's whole process group.
+func killProcess(p *os.Process) {
+	syscall.Kill(-p.Pid, syscall.SIGKILL)
 }
 
 // maxMemoryMB is the process's peak resident set size. ru_maxrss is in

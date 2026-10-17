@@ -1,0 +1,52 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# Sandbox pods accept no connections and may connect only to opensnack
+# (its AWS API and its Runtime API) and to cluster DNS. The executor
+# doesn't create this policy: apply it with the namespace, and check that
+# your cluster enforces NetworkPolicy (k3s does; some CNIs don't).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: lambda-sandboxes
+  namespace: opensnack-lambda
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+  ingress: []
+  egress:
+    # opensnack: the AWS API (4566) and the Runtime API (9001).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: opensnack
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: opensnack
+      ports:
+        - { protocol: TCP, port: 4566 }
+        - { protocol: TCP, port: 9001 }
+    # If AWS host names resolve to an ingress controller in front of
+    # opensnack rather than to opensnack's own Service, allow that
+    # controller instead (k3s's Traefik shown), on its HTTPS port:
+    # - to:
+    #     - namespaceSelector:
+    #         matchLabels:
+    #           kubernetes.io/metadata.name: kube-system
+    #       podSelector:
+    #         matchLabels:
+    #           app.kubernetes.io/name: traefik
+    #   ports:
+    #     - { protocol: TCP, port: 8443 }
+    # Cluster DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

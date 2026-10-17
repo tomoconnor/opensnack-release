@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"opensnack/internal/egress"
 	"opensnack/internal/resource"
@@ -214,6 +215,27 @@ func TestDataPlaneLambdaProxy(t *testing.T) {
 	rec = dataPlane(h, "OPTIONS", host+"/prod/pets/1", map[string]string{"Origin": "https://site.example", "Access-Control-Request-Method": "GET"})
 	if rec.Code != 204 || rec.Header().Get("Access-Control-Allow-Methods") != "GET" {
 		t.Errorf("preflight: %d %v", rec.Code, rec.Header())
+	}
+}
+
+// slowInvoker is a function that outlasts any caller.
+type slowInvoker struct{}
+
+func (slowInvoker) InvokeLambda(ctx context.Context, _ LambdaInvocation) ([]byte, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// The integration timeout bounds the whole Lambda call, cold start and all.
+func TestDataPlaneLambdaTimeout(t *testing.T) {
+	h := NewHandler(resource.NewMemStore())
+	id := newAPI(t, h, "prod", "GET /slow", obj{"integrationType": "AWS_PROXY", "timeoutInMillis": 50,
+		"integrationUri": "arn:aws:lambda:us-east-1:000000000000:function:slow", "payloadFormatVersion": "2.0"})
+	h.Invoker = slowInvoker{}
+	start := time.Now()
+	rec := dataPlane(h, "GET", "https://"+id+".execute-api.us-east-1.amazonaws.com/prod/slow", nil)
+	if rec.Code != http.StatusGatewayTimeout || time.Since(start) > 5*time.Second {
+		t.Fatalf("timeout: %d after %s", rec.Code, time.Since(start))
 	}
 }
 

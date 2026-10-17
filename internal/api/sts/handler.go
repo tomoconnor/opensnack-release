@@ -5,6 +5,7 @@
 package sts
 
 import (
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -146,17 +147,7 @@ func (h *Handler) AssumeRole(w http.ResponseWriter, r *http.Request) {
 	if sess := h.Sessions.Get(id.AccessKeyID); sess != nil {
 		caller = sess.Arn
 	}
-	// Roles live in the caller's own account; anything else (another
-	// account, a malformed ARN, a role that doesn't exist) is denied the way
-	// AWS denies it.
-	parts := strings.SplitN(roleArn, ":", 6)
-	var role *iam.RoleInfo
-	if len(parts) == 6 && parts[4] == id.AccountID && strings.HasPrefix(parts[5], "role/") {
-		name := parts[5][strings.LastIndex(parts[5], "/")+1:]
-		if info, ok := iam.LookupRole(h.Store, util.GlobalNamespace(r), id.AccountID, name); ok && info.Arn == roleArn {
-			role = info
-		}
-	}
+	role := h.lookupRole(util.GlobalNamespace(r), id.AccountID, roleArn)
 	if role == nil {
 		awsresponses.WriteErrorXML(w, http.StatusForbidden, "AccessDenied",
 			"User: "+caller+" is not authorized to perform: sts:AssumeRole on resource: "+roleArn, "")
@@ -178,6 +169,34 @@ func (h *Handler) AssumeRole(w http.ResponseWriter, r *http.Request) {
 		},
 		ResponseMetadata: ResponseMetadata{RequestId: awsresponses.NextRequestID()},
 	})
+}
+
+// lookupRole finds a role by ARN. Roles live in the caller's own account;
+// anything else (another account, a malformed ARN, a role that doesn't
+// exist) is nil, and denied the way AWS denies it.
+func (h *Handler) lookupRole(namespace, account, roleArn string) *iam.RoleInfo {
+	parts := strings.SplitN(roleArn, ":", 6)
+	if len(parts) != 6 || parts[4] != account || !strings.HasPrefix(parts[5], "role/") {
+		return nil
+	}
+	name := parts[5][strings.LastIndex(parts[5], "/")+1:]
+	if info, ok := iam.LookupRole(h.Store, namespace, account, name); ok && info.Arn == roleArn {
+		return info
+	}
+	return nil
+}
+
+// RoleSession issues credentials for a role on behalf of a service that
+// assumes it (Lambda, for a function's execution role). They belong to the
+// role's namespace and account like any AssumeRole session; the service
+// picks their lifetime, which isn't bound by the role's MaxSessionDuration.
+func (h *Handler) RoleSession(namespace, account, roleArn, session string, ttl time.Duration) (*Session, error) {
+	role := h.lookupRole(namespace, account, roleArn)
+	if role == nil {
+		return nil, fmt.Errorf("role %s cannot be assumed", roleArn)
+	}
+	id := &util.Identity{Namespace: namespace, AccountID: account}
+	return h.issue(id, ttl, "arn:aws:sts::"+account+":assumed-role/"+role.Name+"/"+session, role.ID+":"+session), nil
 }
 
 // GetSessionToken issues temporary keys that act as the caller.

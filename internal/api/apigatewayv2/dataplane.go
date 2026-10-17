@@ -462,17 +462,48 @@ func (c *dpCall) lambdaProxy() {
 		event = c.eventV1()
 	}
 	payload, _ := json.Marshal(event)
-	out, err := c.h.Invoker.InvokeLambda(c.r.Context(), LambdaInvocation{
-		Namespace: c.d.namespace,
-		Region:    c.d.region,
-		AccountID: str(c.d.api, "_accountId"),
-		Function:  functionFromURI(str(c.integ, "integrationUri")),
-		Payload:   payload,
-	})
+	// The integration timeout (30 s by default) covers the whole call,
+	// cold start included.
+	timeout := 30 * time.Second
+	if ms, ok := c.integ["timeoutInMillis"].(float64); ok && ms > 0 {
+		timeout = time.Duration(ms) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(c.r.Context(), timeout)
+	defer cancel()
+	http.NewResponseController(c.w).SetWriteDeadline(time.Now().Add(timeout + 5*time.Second))
+	// A function already running when the timeout passes carries on; the
+	// client gets its 504 now.
+	type outcome struct {
+		out []byte
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		out, err := c.h.Invoker.InvokeLambda(ctx, LambdaInvocation{
+			Namespace: c.d.namespace,
+			Region:    c.d.region,
+			AccountID: str(c.d.api, "_accountId"),
+			Function:  functionFromURI(str(c.integ, "integrationUri")),
+			Payload:   payload,
+		})
+		done <- outcome{out, err}
+	}()
+	var out []byte
+	var err error
+	select {
+	case o := <-done:
+		out, err = o.out, o.err
+	case <-ctx.Done():
+		err = ctx.Err()
+	}
 	if err != nil {
 		zap.L().Info("apigateway: lambda proxy failed", zap.String("api", str(c.d.api, "apiId")), zap.Error(err))
 		if errors.Is(err, ErrNoInvoker) {
 			dpError(c.w, http.StatusBadGateway, "Bad Gateway")
+			return
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			dpError(c.w, http.StatusGatewayTimeout, "Service Unavailable")
 			return
 		}
 		dpError(c.w, http.StatusInternalServerError, "Internal Server Error")

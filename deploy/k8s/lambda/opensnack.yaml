@@ -1,0 +1,100 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+# The opensnack side: its service account (bound by rbac.yaml), a Service
+# for the Runtime API that only sandboxes use, and the Deployment settings
+# the executor needs. Merge these into your own opensnack manifests; the
+# database, credentials and AWS API Service are left out.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensnack
+  namespace: opensnack
+---
+# The Runtime API. Keep it off every Ingress: only sandbox pods should
+# reach it (opensnack-runtime-policy below enforces that).
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensnack-runtime
+  namespace: opensnack
+spec:
+  selector:
+    app.kubernetes.io/name: opensnack
+  ports:
+    - name: runtime
+      port: 9001
+      targetPort: runtime
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: opensnack-runtime-policy
+  namespace: opensnack
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: opensnack
+  policyTypes: ["Ingress"]
+  ingress:
+    # The Runtime API, from sandboxes only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: opensnack-lambda
+      ports:
+        - { protocol: TCP, port: 9001 }
+    # The AWS API, from anywhere that should reach it.
+    - ports:
+        - { protocol: TCP, port: 4566 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensnack
+  namespace: opensnack
+spec:
+  # One replica only: each opensnack collects sandbox pods it doesn't know
+  # as orphans, and Recreate keeps an old and a new one from overlapping.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: opensnack
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: opensnack
+    spec:
+      serviceAccountName: opensnack
+      containers:
+        - name: opensnack
+          image: opensnack:latest
+          ports:
+            - { name: api, containerPort: 4566 }
+            - { name: runtime, containerPort: 9001 }
+          env:
+            - { name: OPENSNACK_AUTH_MODE, value: strict }
+            - { name: OPENSNACK_LAMBDA_EXECUTOR, value: kubernetes }
+            - { name: OPENSNACK_LAMBDA_K8S_NAMESPACE, value: opensnack-lambda }
+            - { name: OPENSNACK_LAMBDA_K8S_SERVICE_ACCOUNT, value: opensnack-lambda }
+            # A sandboxing RuntimeClass (a microVM or user-space kernel). Empty
+            # uses the cluster's default runtime: fine for CI, not for
+            # untrusted code.
+            - { name: OPENSNACK_LAMBDA_K8S_RUNTIME_CLASS, value: "" }
+            - { name: OPENSNACK_LAMBDA_K8S_RUNTIME_API, value: opensnack-runtime.opensnack.svc.cluster.local:9001 }
+            - { name: OPENSNACK_LAMBDA_RUNTIME_LISTEN_ADDR, value: ":9001" }
+            # Pin runtime images by digest.
+            - { name: OPENSNACK_LAMBDA_K8S_IMAGE_PYTHON, value: "registry.example/opensnack-lambda-python@sha256:..." }
+            - { name: OPENSNACK_LAMBDA_K8S_IMAGE_NODEJS, value: "registry.example/opensnack-lambda-nodejs@sha256:..." }
+            - { name: OPENSNACK_LAMBDA_K8S_MAX_PODS, value: "20" }
+            - { name: OPENSNACK_LAMBDA_CONCURRENCY_PER_NAMESPACE, value: "2" }
+            - { name: OPENSNACK_LAMBDA_K8S_IDLE_TTL, value: 5m }
+            # Where functions' AWS SDK calls go, if sandboxes can't resolve
+            # the real AWS host names to opensnack:
+            # - { name: OPENSNACK_LAMBDA_AWS_ENDPOINT_URL, value: "http://opensnack.opensnack.svc.cluster.local:4566" }
+            # A ConfigMap (in opensnack-lambda) whose ca.crt sandboxes should
+            # trust, if opensnack serves AWS host names with its own CA:
+            # - { name: OPENSNACK_LAMBDA_K8S_CA_CONFIGMAP, value: opensnack-ca }

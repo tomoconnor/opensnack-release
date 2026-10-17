@@ -5,24 +5,27 @@
 package lambda
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"opensnack/internal/unzip"
 )
 
 // LocalExecutor runs functions as ordinary child processes of opensnack:
-// python3 for python* runtimes, node for nodejs*.
+// python3 for python* runtimes, node for nodejs*. Each invocation gets a
+// fresh process that takes it from the Runtime API on loopback.
 //
 // UNSAFE FOR UNTRUSTED CODE. There is no sandbox: the function runs as the
 // opensnack user, can read its files, reach the network and use as much
@@ -37,6 +40,14 @@ type LocalExecutor struct {
 	Node   string
 	// TempDir holds each invocation's unpacked code; empty means os.TempDir.
 	TempDir string
+	// Credentials, when set, gives functions credentials for their
+	// execution role. Without it they run with none.
+	Credentials CredentialIssuer
+
+	once     sync.Once
+	d        *dispatcher
+	apiAddr  string
+	startErr error
 }
 
 //go:embed bootstrap/bootstrap.py
@@ -49,6 +60,23 @@ const (
 	maxUnzipped   = 250 << 20
 	maxLogCapture = 1 << 20
 )
+
+func (e *LocalExecutor) SetCredentialIssuer(c CredentialIssuer) { e.Credentials = c }
+
+// runtime starts the loopback Runtime API the first time it's needed.
+func (e *LocalExecutor) runtime() (*dispatcher, string, error) {
+	e.once.Do(func() {
+		e.d = newDispatcher(maxLogBytes())
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			e.startErr = err
+			return
+		}
+		e.apiAddr = ln.Addr().String()
+		go http.Serve(ln, e.d)
+	})
+	return e.d, e.apiAddr, e.startErr
+}
 
 func (e *LocalExecutor) Invoke(ctx context.Context, inv *Invocation) (*InvocationResult, error) {
 	var interp, bootName string
@@ -65,6 +93,10 @@ func (e *LocalExecutor) Invoke(ctx context.Context, inv *Invocation) (*Invocatio
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s (%v)", ErrUnsupportedRuntime, inv.Runtime, err)
 	}
+	d, apiAddr, err := e.runtime()
+	if err != nil {
+		return nil, err
+	}
 
 	work, err := os.MkdirTemp(e.TempDir, "opensnack-lambda-")
 	if err != nil {
@@ -73,102 +105,105 @@ func (e *LocalExecutor) Invoke(ctx context.Context, inv *Invocation) (*Invocatio
 	defer os.RemoveAll(work)
 	// The bootstrap lives outside the task root so the function's files
 	// can't shadow it.
-	taskRoot := filepath.Join(work, "task")
-	runtimeDir := filepath.Join(work, "runtime")
-	tmpDir := filepath.Join(work, "tmp")
-	for _, d := range []string{taskRoot, runtimeDir, tmpDir} {
-		if err := os.MkdirAll(d, 0o755); err != nil {
+	paths := sandboxPaths{
+		TaskRoot:   filepath.Join(work, "task"),
+		RuntimeDir: filepath.Join(work, "runtime"),
+		Tmp:        filepath.Join(work, "tmp"),
+	}
+	for _, dir := range []string{paths.TaskRoot, paths.RuntimeDir, paths.Tmp} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
 	}
-	if err := unzipTo(inv.Code, taskRoot); err != nil {
+	code, err := inv.LoadCode()
+	if err != nil {
+		return nil, err
+	}
+	if err := unzip.Extract(code, paths.TaskRoot, maxUnzipped); err != nil {
 		return functionError("Runtime.UnzipError", "Could not unzip the deployment package: "+err.Error()), nil
 	}
-	bootPath := filepath.Join(runtimeDir, bootName)
+	bootPath := filepath.Join(paths.RuntimeDir, bootName)
 	if err := os.WriteFile(bootPath, boot, 0o644); err != nil {
 		return nil, err
 	}
 
-	deadline := time.Now().Add(inv.Timeout)
-	spec := map[string]any{
-		"handler":     inv.Handler,
-		"task_root":   taskRoot,
-		"event_path":  filepath.Join(runtimeDir, "event.json"),
-		"result_path": filepath.Join(runtimeDir, "result.json"),
-		"deadline_ms": deadline.UnixMilli(),
-		"context": map[string]any{
-			"function_name":        inv.FunctionName,
-			"function_version":     inv.Version,
-			"invoked_function_arn": inv.InvokedARN,
-			"memory_limit_in_mb":   inv.MemoryMB,
-			"aws_request_id":       inv.RequestID,
-			"log_group_name":       inv.LogGroup,
-			"log_stream_name":      inv.LogStream,
-		},
+	opts := sandboxOptions{Paths: paths, LogStream: inv.LogStream, EndpointURL: endpointFromEnv()}
+	if e.Credentials != nil && inv.Role != "" {
+		if creds, err := e.Credentials.RoleCredentials(inv.Namespace, inv.AccountID, inv.Role, "opensnack-local", time.Hour); err == nil {
+			opts.Creds = creds
+			defer e.Credentials.Revoke(creds.AccessKeyID)
+		}
 	}
-	if len(inv.ClientContext) > 0 && json.Valid(inv.ClientContext) {
-		spec["client_context"] = json.RawMessage(inv.ClientContext)
-	}
-	specPath := filepath.Join(runtimeDir, "spec.json")
-	specJSON, _ := json.Marshal(spec)
-	if err := os.WriteFile(specPath, specJSON, 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(spec["event_path"].(string), inv.Payload, 0o600); err != nil {
-		return nil, err
-	}
+	env := sandboxEnv(inv, opts)
+	sb := d.newSandbox("local/"+inv.RequestID, env, nil)
+	c := newCall(inv, sb.key, d.logLimit)
 
-	runCtx, cancel := context.WithDeadline(ctx, deadline)
-	defer cancel()
-	args := []string{bootPath, specPath}
+	args := []string{bootPath}
 	if bootName == "bootstrap.py" {
 		args = append([]string{"-u", "-B"}, args...)
 	}
-	cmd := exec.CommandContext(runCtx, interp, args...)
-	cmd.Dir = taskRoot
-	cmd.Env = lambdaEnv(inv, taskRoot, runtimeDir, tmpDir)
+	cmd := exec.Command(interp, args...)
+	cmd.Dir = paths.TaskRoot
+	cmd.Env = append(envList(env), "PATH="+os.Getenv("PATH"), "AWS_LAMBDA_RUNTIME_API="+apiAddr, runtimeTokenEnv+"="+sb.token())
 	out := &cappedBuffer{max: maxLogCapture}
 	cmd.Stdout, cmd.Stderr = out, out
 	configureProcess(cmd)
-
-	started := time.Now()
-	runErr := cmd.Run()
-	res := &InvocationResult{Duration: time.Since(started), Logs: splitLines(out.String()), MaxMemoryMB: maxMemoryMB(cmd)}
-
-	if errors.Is(runCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-		fe := functionError("Sandbox.Timedout", fmt.Sprintf("RequestId: %s Error: Task timed out after %.2f seconds", inv.RequestID, inv.Timeout.Seconds()))
-		fe.Logs, fe.Duration, fe.MaxMemoryMB = res.Logs, res.Duration, res.MaxMemoryMB
-		return fe, nil
-	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+	var proc atomic.Pointer[os.Process]
+	sb.stop = func() {
+		if p := proc.Load(); p != nil {
+			killProcess(p)
+		}
 	}
 
-	raw, readErr := os.ReadFile(spec["result_path"].(string))
-	var result struct {
-		OK     bool            `json:"ok"`
-		Result json.RawMessage `json:"result"`
-		Error  json.RawMessage `json:"error"`
+	d.register(sb)
+	d.submit(c)
+	if err := cmd.Start(); err != nil {
+		d.remove(sb, sandboxDeath{Reason: err.Error()})
+		return nil, err
 	}
-	if readErr != nil || json.Unmarshal(raw, &result) != nil {
+	proc.Store(cmd.Process)
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
+
+	select {
+	case <-c.done:
+	case err := <-exited:
 		msg := "Runtime exited without providing a reason"
-		if runErr != nil {
-			msg = "Runtime exited with error: " + runErr.Error()
+		if err != nil {
+			msg = "Runtime exited with error: " + err.Error()
 		}
-		fe := functionError("Runtime.ExitError", fmt.Sprintf("RequestId: %s Error: %s", inv.RequestID, msg))
-		fe.Logs, fe.Duration, fe.MaxMemoryMB = res.Logs, res.Duration, res.MaxMemoryMB
-		return fe, nil
+		d.remove(sb, sandboxDeath{Exit: true, Reason: msg})
+		exited <- err
+	case <-ctx.Done():
+		d.cancel(c, ctx.Err())
 	}
-	if result.OK {
-		res.Payload = result.Result
-		if len(res.Payload) == 0 {
-			res.Payload = []byte("null")
+	d.remove(sb, sandboxDeath{Reason: "invocation over"})
+	<-exited
+	<-c.done
+	if c.err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		return res, nil
+		return nil, c.err
 	}
-	res.FunctionError = "Unhandled"
-	res.Payload = result.Error
+	res := c.result
+	// Anything the process wrote outside the bootstrap's capture (an
+	// interpreter that failed to start, say).
+	if extra := splitLines(out.String()); len(extra) > 0 {
+		res.Logs = append(res.Logs, extra...)
+	}
+	if res.MaxMemoryMB == 0 {
+		res.MaxMemoryMB = maxMemoryMB(cmd)
+	}
 	return res, nil
+}
+
+func envList(env map[string]string) []string {
+	out := make([]string, 0, len(env))
+	for k, v := range env {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 var interpreters sync.Map // name -> resolved path
@@ -209,91 +244,6 @@ func firstNonEmpty(vs ...string) string {
 		}
 	}
 	return ""
-}
-
-// lambdaEnv is the process environment: the variables Lambda defines plus
-// the function's own. Nothing is inherited from opensnack except PATH, so
-// its credentials and DSNs don't leak into the function.
-func lambdaEnv(inv *Invocation, taskRoot, runtimeDir, tmpDir string) []string {
-	env := map[string]string{}
-	for k, v := range inv.Environment {
-		env[k] = v
-	}
-	for k, v := range map[string]string{
-		"PATH":                            os.Getenv("PATH"),
-		"HOME":                            tmpDir,
-		"TMPDIR":                          tmpDir,
-		"LANG":                            "en_US.UTF-8",
-		"TZ":                              ":UTC",
-		"LAMBDA_TASK_ROOT":                taskRoot,
-		"LAMBDA_RUNTIME_DIR":              runtimeDir,
-		"_HANDLER":                        inv.Handler,
-		"AWS_REGION":                      inv.Region,
-		"AWS_DEFAULT_REGION":              inv.Region,
-		"AWS_EXECUTION_ENV":               "AWS_Lambda_" + inv.Runtime,
-		"AWS_LAMBDA_FUNCTION_NAME":        inv.FunctionName,
-		"AWS_LAMBDA_FUNCTION_VERSION":     inv.Version,
-		"AWS_LAMBDA_FUNCTION_MEMORY_SIZE": fmt.Sprint(inv.MemoryMB),
-		"AWS_LAMBDA_LOG_GROUP_NAME":       inv.LogGroup,
-		"AWS_LAMBDA_LOG_STREAM_NAME":      inv.LogStream,
-		"AWS_LAMBDA_INITIALIZATION_TYPE":  "on-demand",
-	} {
-		env[k] = v
-	}
-	out := make([]string, 0, len(env))
-	for k, v := range env {
-		out = append(out, k+"="+v)
-	}
-	return out
-}
-
-// unzipTo extracts a deployment package, refusing entries that would land
-// outside dir and packages that unpack too large.
-func unzipTo(code []byte, dir string) error {
-	zr, err := zip.NewReader(bytes.NewReader(code), int64(len(code)))
-	if err != nil {
-		return err
-	}
-	var total int64
-	for _, f := range zr.File {
-		name := filepath.Clean(filepath.FromSlash(f.Name))
-		if filepath.IsAbs(name) || name == ".." || strings.HasPrefix(name, ".."+string(filepath.Separator)) {
-			return fmt.Errorf("illegal path in archive: %s", f.Name)
-		}
-		dst := filepath.Join(dir, name)
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(dst, 0o755); err != nil {
-				return err
-			}
-			continue
-		}
-		if f.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlinks are not supported: %s", f.Name)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		mode := f.Mode().Perm() | 0o600
-		w, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-		if err != nil {
-			rc.Close()
-			return err
-		}
-		n, err := io.Copy(w, io.LimitReader(rc, maxUnzipped-total+1))
-		rc.Close()
-		w.Close()
-		if err != nil {
-			return err
-		}
-		if total += n; total > maxUnzipped {
-			return errors.New("unzipped size must be smaller than 262144000 bytes")
-		}
-	}
-	return nil
 }
 
 func splitLines(s string) []string {

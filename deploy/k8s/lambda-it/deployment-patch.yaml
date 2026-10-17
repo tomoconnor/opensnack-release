@@ -1,0 +1,35 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensnack
+  namespace: opensnack
+spec:
+  template:
+    spec:
+      containers:
+        - name: opensnack
+          image: opensnack:it
+          imagePullPolicy: Never
+          readinessProbe:
+            httpGet: { path: /_opensnack/health, port: api }
+            periodSeconds: 2
+          env:
+            - { name: OPENSNACK_PG_DSN, value: "host=postgres user=postgres password=opensnack dbname=opensnack sslmode=disable" }
+            - { name: OPENSNACK_CREDENTIALS_FILE, value: /etc/opensnack/credentials.json }
+            - { name: OPENSNACK_INTERNAL_TOKEN, value: it-internal-token }
+            - { name: OPENSNACK_LAMBDA_K8S_IMAGE_PYTHON, value: "opensnack-lambda-python:it" }
+            - { name: OPENSNACK_LAMBDA_K8S_IMAGE_NODEJS, value: "opensnack-lambda-nodejs:it" }
+            - { name: OPENSNACK_LAMBDA_AWS_ENDPOINT_URL, value: "http://opensnack.opensnack.svc.cluster.local:4566" }
+            - { name: OPENSNACK_LAMBDA_K8S_MAX_PODS, value: "12" }
+            - { name: OPENSNACK_LAMBDA_CONCURRENCY_PER_NAMESPACE, value: "4" }
+            - { name: OPENSNACK_LAMBDA_K8S_POLL_INTERVAL, value: 1s }
+          volumeMounts:
+            - { name: credentials, mountPath: /etc/opensnack, readOnly: true }
+      volumes:
+        - name: credentials
+          secret:
+            secretName: opensnack-credentials
