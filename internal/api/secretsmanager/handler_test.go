@@ -43,12 +43,13 @@ func ok(t *testing.T, h *sm.Handler, action string, input, out any) {
 
 func errType(t *testing.T, rec *httptest.ResponseRecorder) string {
 	t.Helper()
-	var body struct {
-		Type    string `json:"__type"`
-		Message string `json:"message"`
-	}
+	// A map, not a struct: encoding/json matches keys case-insensitively,
+	// and SDKs before the schema-based serde read only "Message".
+	var body map[string]any
 	json.Unmarshal(rec.Body.Bytes(), &body)
-	return body.Type + ": " + body.Message
+	typ, _ := body["__type"].(string)
+	msg, _ := body["Message"].(string)
+	return typ + ": " + msg
 }
 
 func str(s string) *string { return &s }

@@ -123,7 +123,9 @@ func writeError(w http.ResponseWriter, e *smError) {
 	if e.errType == "InternalServiceError" {
 		status = http.StatusInternalServerError
 	}
-	writeSecretsJSON(w, status, map[string]any{"__type": e.errType, "message": e.message})
+	// Secrets Manager's errors carry "Message"; SDKs older than the
+	// schema-based serde read only that, so "message" left it blank.
+	writeSecretsJSON(w, status, map[string]any{"__type": e.errType, "Message": e.message})
 }
 
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -141,7 +143,7 @@ func (h *Handler) Dispatch(w http.ResponseWriter, r *http.Request) {
 	if target == "" {
 		writeSecretsJSON(w, http.StatusBadRequest, map[string]any{
 			"__type":  "MissingAuthenticationTokenException",
-			"message": "Missing X-Amz-Target header",
+			"Message": "Missing X-Amz-Target header",
 		})
 		return
 	}
@@ -150,7 +152,7 @@ func (h *Handler) Dispatch(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(target, "secretsmanager.") {
 		writeSecretsJSON(w, http.StatusBadRequest, map[string]any{
 			"__type":  "InvalidAction",
-			"message": "Invalid action: " + target,
+			"Message": "Invalid action: " + target,
 		})
 		return
 	}
@@ -194,7 +196,7 @@ func (h *Handler) Dispatch(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeSecretsJSON(w, http.StatusBadRequest, map[string]any{
 			"__type":  "InvalidAction",
-			"message": "Unknown operation: " + action,
+			"Message": "Unknown operation: " + action,
 		})
 	}
 }
