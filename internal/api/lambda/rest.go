@@ -127,7 +127,10 @@ func (h *Handler) RetireNamespace(namespace string) error {
 func (h *Handler) WaitAsync() { h.invokes.Wait() }
 
 //
-// Errors (REST-JSON: status, X-Amzn-ErrorType, {"Type","message"})
+// Errors (REST-JSON: status, X-Amzn-ErrorType, {"Type","Message"}). The
+// message goes under both spellings: Lambda's error shapes differ (most
+// have "Message", TooManyRequestsException has "message"), and older SDKs
+// read only their own.
 //
 
 type apiError struct {
@@ -173,7 +176,7 @@ func writeError(w http.ResponseWriter, err error) {
 		e = &apiError{http.StatusInternalServerError, "ServiceException", err.Error()}
 	}
 	w.Header().Set("X-Amzn-ErrorType", e.Code)
-	writeJSON(w, e.Status, map[string]string{"Type": "User", "message": e.Message})
+	writeJSON(w, e.Status, map[string]string{"Type": "User", "Message": e.Message, "message": e.Message})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -76,7 +76,7 @@ func (c *client) fails(rec *httptest.ResponseRecorder, status int, code string) 
 		c.t.Fatalf("got %d %q, want %d %s: %s", rec.Code, rec.Header().Get("X-Amzn-ErrorType"), status, code, rec.Body.String())
 	}
 	var body map[string]string
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["Type"] != "User" || body["message"] == "" {
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body["Type"] != "User" || body["Message"] == "" || body["message"] != body["Message"] {
 		c.t.Fatalf("error body %s", rec.Body.String())
 	}
 }
