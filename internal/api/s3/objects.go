@@ -279,6 +279,10 @@ func (h *Handler) DeleteObjects(w http.ResponseWriter, r *http.Request) {
 
 	out := DeleteResult{Xmlns: s3XMLNS}
 	for _, o := range in.Objects {
+		if h.denied(r, bmeta, deleteAction(o.VersionID), objectARN(bmeta.Name, o.Key)) {
+			out.Errors = append(out.Errors, DeleteError{Key: o.Key, VersionID: o.VersionID, Code: "AccessDenied", Message: "Access Denied"})
+			continue
+		}
 		var res deleteResult
 		var err error
 		if o.VersionID != "" {

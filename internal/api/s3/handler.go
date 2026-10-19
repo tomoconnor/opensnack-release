@@ -19,10 +19,14 @@ import (
 
 type Handler struct {
 	Store resource.Store
+	// Principal, when set, names the caller as a bucket policy's
+	// aws:PrincipalArn sees it (an assumed role, say); "" or nil means the
+	// namespace's user.
+	Principal func(*http.Request) string
 }
 
 func NewHandler(store resource.Store) *Handler {
-	return &Handler{store}
+	return &Handler{Store: store}
 }
 
 // extractBucketKey extracts bucket and key from URL path

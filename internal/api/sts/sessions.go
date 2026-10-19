@@ -21,6 +21,9 @@ type Session struct {
 	Expires      time.Time
 	// Arn and UserID are what GetCallerIdentity reports for the session.
 	Arn, UserID string
+	// RoleArn is the assumed role's ARN, which policies see as
+	// aws:PrincipalArn; "" for sessions that aren't a role's.
+	RoleArn string
 }
 
 // Sessions holds the temporary credentials STS has issued. It is an
@@ -67,6 +70,15 @@ func (s *Sessions) Get(accessKeyID string) *Session {
 		return nil
 	}
 	return sess
+}
+
+// PrincipalArn is aws:PrincipalArn for an access key's session: the role's
+// ARN, or "" when the key isn't an assumed role's.
+func (s *Sessions) PrincipalArn(accessKeyID string) string {
+	if sess := s.Get(accessKeyID); sess != nil {
+		return sess.RoleArn
+	}
+	return ""
 }
 
 func (s *Sessions) Lookup(_ context.Context, accessKeyID string) (*auth.Credential, error) {

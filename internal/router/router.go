@@ -34,6 +34,7 @@ import (
 	"opensnack/internal/api/ssm"
 	"opensnack/internal/api/sts"
 	"opensnack/internal/resource"
+	"opensnack/internal/util"
 )
 
 // IMPORTANT:
@@ -114,6 +115,7 @@ func NewServer(store resource.Store, cfg Config) *Server {
 	sessions := sts.NewSessions()
 	cfg.Auth.AddSource(sessions)
 	stsh := sts.NewHandler(store, sessions)
+	s3h.Principal = func(r *http.Request) string { return sessions.PrincipalArn(util.IdentityFrom(r).AccessKeyID) }
 	snsh.RegisterDeliverer("sqs", sqsh)
 	iamh := iam.NewHandler(store)
 	logsh := logs.NewHandler(store)

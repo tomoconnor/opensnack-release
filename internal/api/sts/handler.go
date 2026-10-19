@@ -161,6 +161,7 @@ func (h *Handler) AssumeRole(w http.ResponseWriter, r *http.Request) {
 	assumedID := role.ID + ":" + session
 	assumedArn := "arn:aws:sts::" + id.AccountID + ":assumed-role/" + role.Name + "/" + session
 	sess := h.issue(id, ttl, assumedArn, assumedID)
+	sess.RoleArn = role.Arn
 
 	awsresponses.WriteXML(w, AssumeRoleResponse{
 		Result: AssumeRoleResult{

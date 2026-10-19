@@ -619,8 +619,13 @@ func (h *Handler) DeleteObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	vid := r.URL.Query().Get("versionId")
+	if h.denied(r, bmeta, deleteAction(vid), objectARN(bmeta.Name, key)) {
+		accessDenied(w)
+		return
+	}
 	var res deleteResult
-	if vid := r.URL.Query().Get("versionId"); vid != "" {
+	if vid != "" {
 		res, err = h.deleteVersion(ns, bucket, key, vid)
 	} else {
 		res, err = h.deleteKey(ns, bmeta.Versioning, bucket, key, "")
