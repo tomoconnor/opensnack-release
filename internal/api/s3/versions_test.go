@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -239,6 +240,23 @@ func TestCopyRestoresOlderVersion(t *testing.T) {
 	}
 	if lv := e.versions("rv"); len(lv.Versions) != 3 {
 		t.Fatalf("want 3 versions, got %d", len(lv.Versions))
+	}
+}
+
+// The AWS provider's aws_s3_object_copy query-escapes the whole source,
+// version and all: bucket%2Fkey%3FversionId%3D...
+func TestCopyRestoresEncodedVersion(t *testing.T) {
+	e := newEnv(t)
+	e.versioned("ev", "Enabled")
+	first := e.must(200, e.do("PUT", "/ev/k", "one")).Header().Get("X-Amz-Version-Id")
+	e.must(200, e.do("PUT", "/ev/k", "two"))
+
+	rec := e.must(200, e.do("PUT", "/ev/k", "", "X-Amz-Copy-Source", url.QueryEscape("ev/k?versionId="+first)))
+	if rec.Header().Get("X-Amz-Copy-Source-Version-Id") != first {
+		t.Fatalf("copy source version %v", rec.Header())
+	}
+	if got := e.must(200, e.do("GET", "/ev/k", "")).Body.String(); got != "one" {
+		t.Fatalf("restored body %q", got)
 	}
 }
 

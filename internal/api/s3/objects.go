@@ -114,6 +114,14 @@ func (h *Handler) CopyObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	source := r.Header.Get("X-Amz-Copy-Source")
+	// S3 decodes the value before it looks for the version, so a fully
+	// encoded source (the AWS provider's aws_s3_object_copy sends
+	// bucket%2Fkey%3FversionId%3D...) names a version too.
+	if !strings.Contains(source, "?versionId=") {
+		if d, err := url.QueryUnescape(source); err == nil && strings.Contains(d, "?versionId=") {
+			source = d
+		}
+	}
 	srcPath, srcVid, _ := strings.Cut(source, "?versionId=")
 	if p, err := url.PathUnescape(srcPath); err == nil {
 		srcPath = p
