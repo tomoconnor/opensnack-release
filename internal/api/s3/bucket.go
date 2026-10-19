@@ -82,9 +82,14 @@ func (h *Handler) DeleteBucket(w http.ResponseWriter, r *http.Request) {
 	bucket, _ := extractBucketKey(r.URL.Path)
 	ns := util.GlobalNamespace(r)
 
-	if _, err := h.Store.Get(bucket, "s3", "bucket", ns); err != nil {
+	_, meta, err := h.loadBucket(ns, bucket)
+	if err != nil {
 		w.WriteHeader(404)
 		awsresponses.WriteXML(w, NoSuchBucket(bucket))
+		return
+	}
+	if h.denied(r, meta, "s3:DeleteBucket", "arn:aws:s3:::"+bucket) {
+		accessDenied(w)
 		return
 	}
 

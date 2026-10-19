@@ -8,6 +8,7 @@ import (
 	"encoding/xml"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -242,6 +243,23 @@ func TestCopyRestoresOlderVersion(t *testing.T) {
 	}
 }
 
+// The AWS provider's aws_s3_object_copy query-escapes the whole source,
+// version and all: bucket%2Fkey%3FversionId%3D...
+func TestCopyRestoresEncodedVersion(t *testing.T) {
+	e := newEnv(t)
+	e.versioned("ev", "Enabled")
+	first := e.must(200, e.do("PUT", "/ev/k", "one")).Header().Get("X-Amz-Version-Id")
+	e.must(200, e.do("PUT", "/ev/k", "two"))
+
+	rec := e.must(200, e.do("PUT", "/ev/k", "", "X-Amz-Copy-Source", url.QueryEscape("ev/k?versionId="+first)))
+	if rec.Header().Get("X-Amz-Copy-Source-Version-Id") != first {
+		t.Fatalf("copy source version %v", rec.Header())
+	}
+	if got := e.must(200, e.do("GET", "/ev/k", "")).Body.String(); got != "one" {
+		t.Fatalf("restored body %q", got)
+	}
+}
+
 func TestDeleteObjectsEmptiesVersionedBucket(t *testing.T) {
 	e := newEnv(t)
 	e.versioned("db", "Enabled")
@@ -402,4 +420,50 @@ func TestBucketEncryptionAppliesToObjects(t *testing.T) {
 		t.Fatalf("stored config %s", body)
 	}
 	e.must(400, e.do("PUT", "/eb?encryption", `<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>AES256</SSEAlgorithm><KMSMasterKeyID>k</KMSMasterKeyID></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>`))
+}
+
+// A bucket policy's explicit Deny stops deletes: the bucket and object
+// versions here, as a "nobody deletes this" policy does on AWS. A delete
+// marker is still allowed, and the policy itself can always be removed.
+func TestBucketPolicyDeniesDeletes(t *testing.T) {
+	e := newEnv(t)
+	e.versioned("pd", "Enabled")
+	e.must(200, e.do("PUT", "/pd/list.csv", "1"))
+	e.must(200, e.do("PUT", "/pd/list.csv", "2"))
+	policy := `{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*",` +
+		`"Action":["s3:DeleteBucket","s3:DeleteObjectVersion"],"Resource":["arn:aws:s3:::pd","arn:aws:s3:::pd/*"],` +
+		`"Condition":{"ArnNotEquals":{"aws:PrincipalArn":"arn:aws:iam::000000000000:role/keeper"}}}]}`
+	e.must(200, e.do("PUT", "/pd?policy", policy))
+
+	lv := e.versions("pd")
+	old := lv.Versions[len(lv.Versions)-1].VersionID
+	if rec := e.do("DELETE", "/pd/list.csv?versionId="+old, ""); rec.Code != 403 || !strings.Contains(rec.Body.String(), "AccessDenied") {
+		t.Fatalf("version delete: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := e.must(200, e.do("POST", "/pd?delete", "<Delete><Object><Key>list.csv</Key><VersionId>"+old+"</VersionId></Object></Delete>"))
+	if !strings.Contains(rec.Body.String(), "<Code>AccessDenied</Code>") {
+		t.Fatalf("batch version delete: %s", rec.Body.String())
+	}
+	if rec := e.do("DELETE", "/pd", ""); rec.Code != 403 {
+		t.Fatalf("bucket delete: %d %s", rec.Code, rec.Body.String())
+	}
+	if lv := e.versions("pd"); len(lv.Versions) != 2 {
+		t.Fatalf("versions after denied deletes: %+v", lv)
+	}
+	e.must(204, e.do("DELETE", "/pd/list.csv", "")) // a delete marker
+
+	// The keeper, by assumed role, may.
+	e.h.Principal = func(*http.Request) string { return "arn:aws:iam::000000000000:role/keeper" }
+	e.must(204, e.do("DELETE", "/pd/list.csv?versionId="+old, ""))
+	e.h.Principal = nil
+
+	e.must(204, e.do("DELETE", "/pd?policy", ""))
+	lv = e.versions("pd")
+	for _, v := range lv.Versions {
+		e.must(204, e.do("DELETE", "/pd/list.csv?versionId="+v.VersionID, ""))
+	}
+	for _, m := range lv.DeleteMarkers {
+		e.must(204, e.do("DELETE", "/pd/list.csv?versionId="+m.VersionID, ""))
+	}
+	e.must(204, e.do("DELETE", "/pd", ""))
 }
