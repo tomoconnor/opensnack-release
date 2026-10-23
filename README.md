@@ -110,6 +110,7 @@ Pod names and labels carry hashes, never the tenant's namespace or function name
 | `OPENSNACK_LAMBDA_K8S_TMP_SIZE`, `OPENSNACK_LAMBDA_K8S_TASK_SIZE` | `512Mi`, `320Mi` | Size limits of `/tmp` and of `/var/task`, where the code is unpacked. |
 | `OPENSNACK_LAMBDA_K8S_MAX_PROCS` | 1024 | Processes and threads per sandbox (`RLIMIT_NPROC`; each pod has its own UID). Also set the kubelet's `podPidsLimit` as a node-wide backstop. |
 | `OPENSNACK_LAMBDA_K8S_MB_PER_VCPU`, `OPENSNACK_LAMBDA_K8S_MIN_CPU_MILLIS` | 1769, 0 | CPU limit = memory ÷ this, in vCPUs, with an optional floor in millicores. |
+| `OPENSNACK_LAMBDA_K8S_CPU_REQUEST_MILLIS` | 0 | CPU request in millicores, if below the limit; 0 makes the request equal the limit. |
 | `OPENSNACK_LAMBDA_K8S_UID_BASE`, `OPENSNACK_LAMBDA_K8S_UID_COUNT` | 100000, 50000 | Each pod runs as a random UID in this range. |
 | `OPENSNACK_LAMBDA_K8S_CA_CONFIGMAP` | unset | ConfigMap in the sandbox namespace whose `ca.crt` the sandboxes trust as well as the system CAs, for an OpenSnack that serves AWS host names with its own CA. |
 | `OPENSNACK_LAMBDA_K8S_POLL_INTERVAL` | `2s` | How often pods are checked for crashes, idleness and orphans. |

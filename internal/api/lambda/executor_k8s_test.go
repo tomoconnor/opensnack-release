@@ -864,3 +864,26 @@ func TestK8sGuestOverhead(t *testing.T) {
 		t.Errorf("resources: %+v", c.Resources)
 	}
 }
+
+func TestK8sCPURequest(t *testing.T) {
+	cases := []struct {
+		request     int
+		wantRequest string
+	}{
+		{0, "1000m"},    // unset: Guaranteed, the request equals the limit
+		{100, "100m"},   // below the limit: Burstable
+		{5000, "1000m"}, // above the limit: capped at the limit
+	}
+	for _, tc := range cases {
+		h := newHarness(t, func(c *KubernetesConfig) { c.CPURequestMillis = tc.request })
+		inv := testInvocation("cpu-fn", `{"echo":1}`)
+		inv.MemoryMB = 1769
+		h.invoke(inv)
+		h.mu.Lock()
+		r := h.created[0].Spec.Containers[0].Resources
+		h.mu.Unlock()
+		if r.Limits["cpu"] != "1000m" || r.Requests["cpu"] != tc.wantRequest || r.Requests["memory"] != r.Limits["memory"] {
+			t.Errorf("request %dm: resources %+v, want cpu request %s, limit 1000m, memory equal", tc.request, r, tc.wantRequest)
+		}
+	}
+}
