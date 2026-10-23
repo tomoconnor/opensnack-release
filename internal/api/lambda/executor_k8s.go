@@ -88,6 +88,11 @@ type KubernetesConfig struct {
 	// full vCPU at 1769 MB. MinCPUMillis is a floor.
 	MBPerVCPU    int
 	MinCPUMillis int
+	// CPURequestMillis, when set and below the limit, is the pod's CPU
+	// request; otherwise the request equals the limit. A sandbox mostly
+	// idles between invocations, so a low request lets a node schedule
+	// many more of them, while the limit still sizes a cold start.
+	CPURequestMillis int
 	// CAConfigMap names a ConfigMap whose ca.crt is added to the sandbox's
 	// trusted CAs (for an opensnack serving AWS host names with its own CA).
 	CAConfigMap string
@@ -234,6 +239,7 @@ func KubernetesConfigFromEnv() (KubernetesConfig, error) {
 	cfg.GuestOverheadMB = int(num("OPENSNACK_LAMBDA_K8S_GUEST_OVERHEAD_MB", 0))
 	cfg.MBPerVCPU = int(num("OPENSNACK_LAMBDA_K8S_MB_PER_VCPU", 1769))
 	cfg.MinCPUMillis = int(num("OPENSNACK_LAMBDA_K8S_MIN_CPU_MILLIS", 0))
+	cfg.CPURequestMillis = int(num("OPENSNACK_LAMBDA_K8S_CPU_REQUEST_MILLIS", 0))
 	cfg.UIDBase = num("OPENSNACK_LAMBDA_K8S_UID_BASE", 100000)
 	cfg.UIDCount = num("OPENSNACK_LAMBDA_K8S_UID_COUNT", 50000)
 	cfg.IdleTTL = dur("OPENSNACK_LAMBDA_K8S_IDLE_TTL", 5*time.Minute)
@@ -258,6 +264,8 @@ func (cfg *KubernetesConfig) validate() error {
 		return errors.New("OPENSNACK_LAMBDA_K8S_GUEST_OVERHEAD_MB can't be negative")
 	case cfg.MBPerVCPU < 1:
 		return errors.New("OPENSNACK_LAMBDA_K8S_MB_PER_VCPU must be at least 1")
+	case cfg.CPURequestMillis < 0:
+		return errors.New("OPENSNACK_LAMBDA_K8S_CPU_REQUEST_MILLIS can't be negative")
 	case cfg.UIDBase < 1 || cfg.UIDCount < 1:
 		return errors.New("OPENSNACK_LAMBDA_K8S_UID_BASE and _UID_COUNT must be at least 1 (sandboxes never run as root)")
 	}
@@ -640,8 +648,12 @@ func (e *KubernetesExecutor) podSpec(inv *Invocation, sb *sandbox, family, image
 	pi := sb.tag.(*podInfo)
 	uid := e.cfg.UIDBase + rand.Int64N(e.cfg.UIDCount)
 	mem := strconv.Itoa(inv.MemoryMB+e.cfg.GuestOverheadMB) + "Mi"
-	cpu := strconv.Itoa(e.cpuMillis(inv.MemoryMB)) + "m"
-	resources := map[string]string{"memory": mem, "cpu": cpu}
+	limitMillis := e.cpuMillis(inv.MemoryMB)
+	limits := map[string]string{"memory": mem, "cpu": strconv.Itoa(limitMillis) + "m"}
+	requests := limits
+	if r := e.cfg.CPURequestMillis; r > 0 && r < limitMillis {
+		requests = map[string]string{"memory": mem, "cpu": strconv.Itoa(r) + "m"}
+	}
 	seccomp := &kube.SeccompProfile{Type: "RuntimeDefault"}
 
 	env := []kube.EnvVar{
@@ -683,7 +695,7 @@ func (e *KubernetesExecutor) podSpec(inv *Invocation, sb *sandbox, family, image
 			Image:           image,
 			ImagePullPolicy: "IfNotPresent",
 			Env:             env,
-			Resources:       kube.ResourceRequirements{Limits: resources, Requests: resources},
+			Resources:       kube.ResourceRequirements{Limits: limits, Requests: requests},
 			SecurityContext: &kube.SecurityContext{
 				Privileged:               boolPtr(false),
 				AllowPrivilegeEscalation: boolPtr(false),
