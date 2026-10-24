@@ -18,6 +18,9 @@ import (
 	"opensnack/internal/logging"
 	"opensnack/internal/resource"
 	"opensnack/internal/router"
+	"opensnack/internal/telemetry"
+
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"go.uber.org/zap"
 )
@@ -29,6 +32,16 @@ func main() {
 	}
 	zap.ReplaceGlobals(logger)
 	defer logger.Sync()
+
+	shutdownTelemetry, err := telemetry.Setup(context.Background(), "")
+	if err != nil {
+		zap.L().Fatal("telemetry", zap.Error(err))
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = shutdownTelemetry(ctx)
+	}()
 
 	pg := db.Connect() // returns *gorm.DB
 	if err := db.Migrate(pg); err != nil {
@@ -62,9 +75,17 @@ func main() {
 		addr = ":4566"
 	}
 
+	var handler http.Handler = app
+	if telemetry.Enabled() {
+		// A server span per request (named by router.TelemetryMiddleware),
+		// continuing the caller's trace; not for health checks.
+		handler = otelhttp.NewHandler(app, "opensnack", otelhttp.WithFilter(func(r *http.Request) bool {
+			return r.URL.Path != "/_opensnack/health"
+		}))
+	}
 	srv := &http.Server{
 		Addr:           addr,
-		Handler:        app,
+		Handler:        handler,
 		ReadTimeout:    15 * time.Second,
 		WriteTimeout:   15 * time.Second,
 		IdleTimeout:    60 * time.Second,
