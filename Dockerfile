@@ -20,13 +20,14 @@ COPY . .
 # Build the binary
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /opensnack ./cmd/opensnack
 
-# Runtime stage
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+# Runtime stage: distroless static, which is the CA certificates and time
+# zone data the static binary needs and nothing else (no shell, no package
+# manager to age out; Alpine 3.20 reached end of life in April 2026). The
+# default user is root, as it was on Alpine; Kubernetes deployments set
+# their own.
+FROM gcr.io/distroless/static-debian13@sha256:15f8637509792e05b97d83451b0b6ccfa4abd548f997e406ac1e72c87fe1fa78
 
 WORKDIR /app
-
-# Install runtime dependencies
-RUN apk add --no-cache ca-certificates tzdata
 
 # Copy binary from builder
 COPY --from=builder /opensnack /app/opensnack
