@@ -15,7 +15,7 @@
 # everything they need is world-readable, and the only writable places are
 # the /tmp and /var/task volumes the pod mounts.
 
-FROM golang:1.25-alpine AS init
+FROM golang:1.27.3-alpine@sha256:b8c9b82affbbb82a020bbcf998dad2ba9516944ac7e883524642a481a9505e9c AS init
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd/lambda-init cmd/lambda-init
@@ -23,7 +23,7 @@ COPY internal/unzip internal/unzip
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /lambda-init ./cmd/lambda-init
 
 # python3.x functions. The AWS SDK (boto3) is preinstalled, as in Lambda.
-FROM python:3.12-slim AS python
+FROM python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704 AS python
 RUN pip install --no-cache-dir --disable-pip-version-check "boto3>=1.35,<2" \
  && find / -xdev -name "__pycache__" -prune -exec rm -rf {} + 2>/dev/null; true
 COPY --from=init /lambda-init /opt/opensnack/lambda-init
@@ -34,7 +34,7 @@ ENTRYPOINT ["/opt/opensnack/lambda-init"]
 
 # nodejs.x functions. A few AWS SDK v3 clients are preinstalled, on
 # NODE_PATH (so require() finds them; ES module imports need them bundled).
-FROM node:22-slim AS nodejs
+FROM node:22-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d AS nodejs
 WORKDIR /opt/nodejs
 RUN npm install --omit=dev --no-audit --no-fund \
       @aws-sdk/client-dynamodb@3 @aws-sdk/lib-dynamodb@3 @aws-sdk/client-s3@3 \

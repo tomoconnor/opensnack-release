@@ -58,6 +58,10 @@ type KubernetesConfig struct {
 	// Images maps a runtime family ("python", "nodejs") to the runtime
 	// image, ideally pinned by digest. A family with no image can't run.
 	Images map[string]string
+	// PullPolicy is the pods' imagePullPolicy: IfNotPresent by default;
+	// Never for images imported onto the nodes by hand, so a missing one
+	// fails instead of being fetched from a registry.
+	PullPolicy string
 	// RuntimeAPI is the host:port pods reach the Runtime API on (a Service
 	// in front of ListenAddr).
 	RuntimeAPI string
@@ -210,6 +214,7 @@ func KubernetesConfigFromEnv() (KubernetesConfig, error) {
 			"python": os.Getenv("OPENSNACK_LAMBDA_K8S_IMAGE_PYTHON"),
 			"nodejs": os.Getenv("OPENSNACK_LAMBDA_K8S_IMAGE_NODEJS"),
 		},
+		PullPolicy:  envString("OPENSNACK_LAMBDA_K8S_IMAGE_PULL_POLICY", "IfNotPresent"),
 		RuntimeAPI:  os.Getenv("OPENSNACK_LAMBDA_K8S_RUNTIME_API"),
 		ListenAddr:  envString("OPENSNACK_LAMBDA_RUNTIME_LISTEN_ADDR", ":9001"),
 		TmpSize:     envString("OPENSNACK_LAMBDA_K8S_TMP_SIZE", "512Mi"),
@@ -258,6 +263,8 @@ func (cfg *KubernetesConfig) validate() error {
 		return errors.New("OPENSNACK_LAMBDA_K8S_RUNTIME_API is required: the host:port sandbox pods reach opensnack's Runtime API on")
 	case cfg.Images["python"] == "" && cfg.Images["nodejs"] == "":
 		return errors.New("set OPENSNACK_LAMBDA_K8S_IMAGE_PYTHON and/or OPENSNACK_LAMBDA_K8S_IMAGE_NODEJS")
+	case cfg.PullPolicy != "IfNotPresent" && cfg.PullPolicy != "Never" && cfg.PullPolicy != "Always":
+		return errors.New("OPENSNACK_LAMBDA_K8S_IMAGE_PULL_POLICY must be IfNotPresent, Never or Always")
 	case cfg.MaxPods < 1:
 		return errors.New("OPENSNACK_LAMBDA_K8S_MAX_PODS must be at least 1")
 	case cfg.GuestOverheadMB < 0:
@@ -693,7 +700,7 @@ func (e *KubernetesExecutor) podSpec(inv *Invocation, sb *sandbox, family, image
 		Containers: []kube.Container{{
 			Name:            "function",
 			Image:           image,
-			ImagePullPolicy: "IfNotPresent",
+			ImagePullPolicy: e.cfg.PullPolicy,
 			Env:             env,
 			Resources:       kube.ResourceRequirements{Limits: limits, Requests: requests},
 			SecurityContext: &kube.SecurityContext{
