@@ -61,6 +61,10 @@ OpenSnack answers on the real AWS host names (`{service}.{region}.amazonaws.com`
 | `OPENSNACK_RATE_LIMIT`, `OPENSNACK_RATE_BURST` | off, 2x rate | Requests per second per namespace. Over the rate, requests get the throttling codes SDKs retry (`SlowDown`, `ThrottlingException`, `Throttling`). |
 | `OPENSNACK_PG_MAX_OPEN`, `OPENSNACK_PG_MAX_IDLE` | 25, 10 | Postgres connection pool, per process. |
 
+## Telemetry
+
+Off by default. With `OTEL_EXPORTER_OTLP_ENDPOINT` set, OpenSnack exports OpenTelemetry traces and metrics over OTLP/HTTP: a span per AWS API request (`sqs CreateQueue`), continuing the caller's trace, and the histogram `opensnack.api.request.duration` by service, action and status. [docs/telemetry.md](docs/telemetry.md) has the details.
+
 ## Lambda execution
 
 Invoke runs function code through an *executor*, chosen by `OPENSNACK_LAMBDA_EXECUTOR`. With none set, Invoke returns a 501 `ServiceException`.

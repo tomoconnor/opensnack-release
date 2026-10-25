@@ -223,7 +223,7 @@ func NewServer(store resource.Store, cfg Config) *Server {
 
 	insp, _ := store.(resource.Inspector)
 	limiter := limits.New(cfg.Limits, insp)
-	authed := cfg.Auth.Middleware(limiter.Middleware(DebugLoggerMiddleware(http.HandlerFunc(dispatch))))
+	authed := cfg.Auth.Middleware(limiter.Middleware(DebugLoggerMiddleware(TelemetryMiddleware(http.HandlerFunc(dispatch)))))
 	// The data planes (execute-api, cloudfront.net) are anonymous HTTP, so
 	// they go round authentication and the per-tenant limits; they find
 	// their tenant from the API or distribution ID in the host name.
