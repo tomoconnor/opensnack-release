@@ -68,8 +68,9 @@ func envInt(name string, def int64) int64 {
 }
 
 // usageTTL is how long a namespace's counted usage is trusted before it is
-// recounted. In between, successful writes adjust it (see recordWrite).
-// Concurrent creates can still overshoot a cap slightly.
+// recounted. In between, successful writes adjust it (see recordWrite), and
+// uploads in flight hold their bytes against the S3 cap (see reserve).
+// Concurrent creates can still overshoot the resource cap slightly.
 const usageTTL = 5 * time.Second
 
 type Limiter struct {
@@ -77,9 +78,10 @@ type Limiter struct {
 	insp resource.Inspector // nil disables the resource and byte caps
 	now  func() time.Time
 
-	mu      sync.Mutex
-	usage   map[string]usage
-	buckets map[string]*bucket
+	mu       sync.Mutex
+	usage    map[string]usage
+	inflight map[string]int64 // S3 bytes reserved by uploads still running
+	buckets  map[string]*bucket
 }
 
 type usage struct {
@@ -95,11 +97,12 @@ type bucket struct {
 
 func New(cfg Config, insp resource.Inspector) *Limiter {
 	return &Limiter{
-		cfg:     cfg,
-		insp:    insp,
-		now:     time.Now,
-		usage:   map[string]usage{},
-		buckets: map[string]*bucket{},
+		cfg:      cfg,
+		insp:     insp,
+		now:      time.Now,
+		usage:    map[string]usage{},
+		inflight: map[string]int64{},
+		buckets:  map[string]*bucket{},
 	}
 }
 
@@ -122,11 +125,12 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 		if upload {
 			max = l.cfg.MaxObjectBytes
 		}
+		// The body's length without aws-chunked framing; -1 if unknown.
+		size := r.ContentLength
+		if v, err := strconv.ParseInt(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 64); err == nil {
+			size = v
+		}
 		if max > 0 {
-			size := r.ContentLength
-			if v, err := strconv.ParseInt(r.Header.Get("X-Amz-Decoded-Content-Length"), 10, 64); err == nil {
-				size = v
-			}
 			if size > max {
 				tooLarge(w, r, max)
 				return
@@ -138,6 +142,7 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 
 		capped := (l.cfg.MaxResources > 0 || l.cfg.MaxS3Bytes > 0) && l.insp != nil
 		create := capped && creates(r)
+		var reserved int64
 		if create {
 			u, err := l.usageOf(ns)
 			if err == nil {
@@ -146,10 +151,18 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 						" resources. Delete some before creating more.")
 					return
 				}
-				if upload && l.cfg.MaxS3Bytes > 0 && u.s3Bytes+max64(r.ContentLength, 0) > l.cfg.MaxS3Bytes {
-					limitExceeded(w, r, "Your S3 objects would exceed the storage quota of "+
-						strconv.FormatInt(l.cfg.MaxS3Bytes, 10)+" bytes.")
-					return
+				if upload && l.cfg.MaxS3Bytes > 0 {
+					// A body of unknown length may be as large as the object cap.
+					n := size
+					if n < 0 {
+						n = max64(max, 0)
+					}
+					if !l.reserve(ns, u, n) {
+						limitExceeded(w, r, "Your S3 objects would exceed the storage quota of "+
+							strconv.FormatInt(l.cfg.MaxS3Bytes, 10)+" bytes.")
+						return
+					}
+					reserved = n
 				}
 			}
 		}
@@ -159,30 +172,54 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 			return
 		}
 		rw := &statusWriter{ResponseWriter: w}
+		defer func() { l.recordWrite(ns, rw.status < 300, create, upload, reserved, size) }()
 		next.ServeHTTP(rw, r)
-		if rw.status < 300 {
-			l.recordWrite(ns, create, upload, r.ContentLength)
-		}
 	})
 }
 
-// recordWrite keeps the cached usage honest between recounts: a create
-// counts as one more resource (and its bytes, for an upload), and any other
-// write (a delete, say) drops the cached figure so the next check recounts.
-func (l *Limiter) recordWrite(ns string, create, upload bool, size int64) {
+// reserve holds n bytes against the namespace's S3 cap while an upload runs,
+// so a burst of uploads can't all pass the same check (AOTF-22). u is the
+// usage just counted, in case a concurrent write has dropped the cached one.
+func (l *Limiter) reserve(ns string, u usage, n int64) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	u, ok := l.usage[ns]
+	if cur, ok := l.usage[ns]; ok {
+		u = cur
+	}
+	if u.s3Bytes+l.inflight[ns]+n > l.cfg.MaxS3Bytes {
+		return false
+	}
+	l.inflight[ns] += n
+	return true
+}
+
+// recordWrite releases an upload's reservation and keeps the cached usage
+// honest between recounts: a create counts as one more resource (and its
+// bytes, for an upload of known size), and any other write (a delete, say)
+// or an upload of unknown size drops the cached figure so the next check
+// recounts.
+func (l *Limiter) recordWrite(ns string, ok, create, upload bool, reserved, size int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if reserved > 0 {
+		if l.inflight[ns] -= reserved; l.inflight[ns] <= 0 {
+			delete(l.inflight, ns)
+		}
+	}
 	if !ok {
 		return
 	}
-	if !create {
+	u, cached := l.usage[ns]
+	if !cached {
+		return
+	}
+	if !create || (upload && size < 0) {
 		delete(l.usage, ns)
 		return
 	}
 	u.resources++
 	if upload {
-		u.s3Bytes += max64(size, 0)
+		u.s3Bytes += size
 	}
 	l.usage[ns] = u
 }

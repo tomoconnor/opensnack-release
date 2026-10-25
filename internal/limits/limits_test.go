@@ -5,9 +5,12 @@
 package limits_test
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"opensnack/internal/limits"
@@ -130,5 +133,81 @@ func TestThrottling(t *testing.T) {
 	c.h.ServeHTTP(rec, req)
 	if rec.Code == 503 {
 		t.Fatalf("p2 throttled by p1's traffic")
+	}
+}
+
+// gatedBody signals when the handler starts reading it, then blocks until
+// the gate opens: it keeps an upload in flight.
+type gatedBody struct {
+	started chan<- struct{}
+	gate    <-chan struct{}
+	r       io.Reader
+	once    sync.Once
+}
+
+func (b *gatedBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { b.started <- struct{}{}; <-b.gate })
+	return b.r.Read(p)
+}
+
+// Uploads in flight count against the S3 cap, so a burst can't all pass the
+// same check (AOTF-22).
+func TestS3CapHoldsUnderBurst(t *testing.T) {
+	t.Setenv("OPENSNACK_OBJECT_ROOT", t.TempDir())
+	h := router.NewWithConfig(resource.NewMemStore(), router.Config{Limits: limits.Config{
+		MaxObjectBytes: 1000, MaxS3Bytes: 1500,
+	}})
+	c := client{t, h}
+	if rec := c.do("PUT", "b.s3.amazonaws.com", "/", ""); rec.Code != 200 {
+		t.Fatalf("bucket: %d", rec.Code)
+	}
+
+	const n = 5 // 400 bytes each: three fit in 1500
+	started, done := make(chan struct{}, n), make(chan int, n)
+	gate := make(chan struct{})
+	for i := range n {
+		go func() {
+			body := &gatedBody{started: started, gate: gate, r: strings.NewReader(strings.Repeat("x", 400))}
+			req := httptest.NewRequest("PUT", "/obj"+strconv.Itoa(i), body)
+			req.ContentLength = 400
+			req.Host = "b.s3.amazonaws.com"
+			req.Header.Set("User-Agent", "test custom-p1")
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			done <- rec.Code
+		}()
+	}
+	// Every upload is either refused or reading its body before any finishes.
+	codes, reading := map[int]int{}, 0
+	for range n {
+		select {
+		case <-started:
+			reading++
+		case code := <-done:
+			codes[code]++
+		}
+	}
+	close(gate)
+	for range reading {
+		codes[<-done]++
+	}
+	if codes[200] != 3 || codes[400] != 2 {
+		t.Fatalf("expected 3 stored and 2 refused, got %v", codes)
+	}
+
+	// Body of unknown length: it may be as large as the object cap, which
+	// doesn't fit in the 300 bytes left.
+	req := httptest.NewRequest("PUT", "/unknown", strings.NewReader("small"))
+	req.ContentLength = -1
+	req.Host = "b.s3.amazonaws.com"
+	req.Header.Set("User-Agent", "test custom-p1")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "QuotaExceeded") {
+		t.Fatalf("unknown length near the cap: %d %s", rec.Code, rec.Body.String())
+	}
+	// A known small one still fits.
+	if rec := c.do("PUT", "b.s3.amazonaws.com", "/small", strings.Repeat("y", 200)); rec.Code != 200 {
+		t.Fatalf("200 bytes with 300 left: %d %s", rec.Code, rec.Body.String())
 	}
 }

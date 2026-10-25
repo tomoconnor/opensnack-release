@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"opensnack/internal/auth"
 	"opensnack/internal/awsresponses"
 	"opensnack/internal/util"
 )
@@ -343,6 +344,11 @@ func (h *Handler) PutObject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, err := readBody(r)
+	if errors.Is(err, auth.ErrContentSHA256Mismatch) {
+		writeS3Error(w, http.StatusBadRequest, "XAmzContentSHA256Mismatch",
+			"The provided 'x-amz-content-sha256' header does not match what was computed.", "/"+bucket+"/"+key)
+		return
+	}
 	if err != nil {
 		writeS3Error(w, http.StatusBadRequest, "IncompleteBody", err.Error(), "/"+bucket+"/"+key)
 		return

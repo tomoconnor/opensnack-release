@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -32,7 +33,30 @@ var (
 	ErrMalformedAuth = errors.New("malformed authorization")
 	ErrBadSignature  = errors.New("signature does not match")
 	ErrExpired       = errors.New("request time too skewed or expired")
+	// ErrContentSHA256Mismatch is a body that isn't the one whose hash was
+	// signed. Large bodies are checked as they're read, so a handler sees it
+	// from the read that reaches the end of the body.
+	ErrContentSHA256Mismatch = errors.New("x-amz-content-sha256 does not match the body")
+	// ErrBadContentSHA256 is an x-amz-content-sha256 that is neither a
+	// SHA-256 digest nor a payload marker S3 knows.
+	ErrBadContentSHA256 = errors.New("x-amz-content-sha256 is not a digest or a known marker")
 )
+
+// payloadMarkers are the x-amz-content-sha256 values that stand for a body
+// that isn't hashed up front.
+var payloadMarkers = map[string]bool{
+	unsignedPayload:                                    true,
+	"STREAMING-UNSIGNED-PAYLOAD-TRAILER":               true,
+	"STREAMING-AWS4-HMAC-SHA256-PAYLOAD":               true,
+	"STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER":       true,
+	"STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD":         true,
+	"STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER": true,
+}
+
+// maxPrecheckedBody is the largest body hashed before the handler runs.
+// Configuration bodies are all far smaller, and some handlers ignore read
+// errors; object uploads are checked as they stream (see hashedBody).
+const maxPrecheckedBody = 1 << 20
 
 // SignedRequest is the parsed SigV4 material from a request, from either the
 // Authorization header or a presigned URL's query string.
@@ -184,7 +208,7 @@ func Verify(r *http.Request, s *SignedRequest, secret string, now time.Time) err
 			hexSHA256([]byte(creq)),
 		}, "\n")
 		if hmac.Equal(hmacSHA256(key, []byte(sts)), want) {
-			return nil
+			return checkPayload(r, payloadHash)
 		}
 	}
 	return ErrBadSignature
@@ -213,6 +237,58 @@ func payloadHash(r *http.Request, s *SignedRequest) (string, error) {
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	return hexSHA256(body), nil
+}
+
+// checkPayload holds the body to the signed x-amz-content-sha256, when that
+// is a digest rather than UNSIGNED-PAYLOAD or a STREAMING-* marker. Without
+// it the signature covers the headers but not the body (AOTF-23).
+func checkPayload(r *http.Request, signed string) error {
+	if payloadMarkers[signed] {
+		return nil
+	}
+	want, err := hex.DecodeString(signed)
+	if err != nil || len(want) != sha256.Size {
+		return ErrBadContentSHA256
+	}
+	if r.Body == nil || r.Body == http.NoBody {
+		return nil
+	}
+	if r.ContentLength < 0 || r.ContentLength > maxPrecheckedBody {
+		r.Body = &hashedBody{ReadCloser: r.Body, h: sha256.New(), want: want}
+		return nil
+	}
+	body, err := io.ReadAll(r.Body)
+	r.Body.Close()
+	if err != nil {
+		return err
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if got := sha256.Sum256(body); !hmac.Equal(got[:], want) {
+		return ErrContentSHA256Mismatch
+	}
+	return nil
+}
+
+// hashedBody hashes a body as it's read and fails the read that reaches its
+// end if the hash isn't the signed one.
+type hashedBody struct {
+	io.ReadCloser
+	h    hash.Hash
+	want []byte
+	err  error
+}
+
+func (b *hashedBody) Read(p []byte) (int, error) {
+	if b.err != nil {
+		return 0, b.err
+	}
+	n, err := b.ReadCloser.Read(p)
+	b.h.Write(p[:n])
+	if err == io.EOF && !hmac.Equal(b.h.Sum(nil), b.want) {
+		b.err = ErrContentSHA256Mismatch
+		return n, b.err
+	}
+	return n, err
 }
 
 func signingKey(secret, date, region, service string) []byte {
