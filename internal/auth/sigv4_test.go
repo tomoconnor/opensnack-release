@@ -149,6 +149,15 @@ func TestVerify_Rejects(t *testing.T) {
 			t.Fatalf("read: %v", err)
 		}
 	})
+	t.Run("signed content hash that isn't one", func(t *testing.T) {
+		for _, v := range []string{"nothex", strings.Repeat("0", 64) + "zz", strings.Repeat("0", 62)} {
+			r := signed(t, "PUT", "https://s3.amazonaws.com/bkt/key", "x", "s3", "us-east-1",
+				map[string]string{"X-Amz-Content-Sha256": v}, true)
+			if err := verify(r); !errors.Is(err, ErrBadContentSHA256) {
+				t.Fatalf("%q: got %v", v, err)
+			}
+		}
+	})
 	t.Run("tampered host", func(t *testing.T) {
 		r := signed(t, "GET", "https://s3.amazonaws.com/bkt", "", "s3", "us-east-1",
 			map[string]string{"X-Amz-Content-Sha256": sha("")}, true)

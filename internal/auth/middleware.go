@@ -219,6 +219,10 @@ func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, proto, http.StatusBadRequest, "XAmzContentSHA256Mismatch",
 			"The provided 'x-amz-content-sha256' header does not match what was computed.")
 		return
+	case errors.Is(err, ErrBadContentSHA256):
+		writeError(w, proto, http.StatusBadRequest, "InvalidArgument",
+			"x-amz-content-sha256 must be UNSIGNED-PAYLOAD, STREAMING-UNSIGNED-PAYLOAD-TRAILER, STREAMING-AWS4-HMAC-SHA256-PAYLOAD, STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER, STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD, STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER or a valid sha256 value.")
+		return
 	case errors.Is(err, ErrMissingAuth):
 		switch proto {
 		case "s3":

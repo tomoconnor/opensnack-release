@@ -37,7 +37,21 @@ var (
 	// signed. Large bodies are checked as they're read, so a handler sees it
 	// from the read that reaches the end of the body.
 	ErrContentSHA256Mismatch = errors.New("x-amz-content-sha256 does not match the body")
+	// ErrBadContentSHA256 is an x-amz-content-sha256 that is neither a
+	// SHA-256 digest nor a payload marker S3 knows.
+	ErrBadContentSHA256 = errors.New("x-amz-content-sha256 is not a digest or a known marker")
 )
+
+// payloadMarkers are the x-amz-content-sha256 values that stand for a body
+// that isn't hashed up front.
+var payloadMarkers = map[string]bool{
+	unsignedPayload:                                    true,
+	"STREAMING-UNSIGNED-PAYLOAD-TRAILER":               true,
+	"STREAMING-AWS4-HMAC-SHA256-PAYLOAD":               true,
+	"STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER":       true,
+	"STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD":         true,
+	"STREAMING-AWS4-ECDSA-P256-SHA256-PAYLOAD-TRAILER": true,
+}
 
 // maxPrecheckedBody is the largest body hashed before the handler runs.
 // Configuration bodies are all far smaller, and some handlers ignore read
@@ -229,8 +243,14 @@ func payloadHash(r *http.Request, s *SignedRequest) (string, error) {
 // is a digest rather than UNSIGNED-PAYLOAD or a STREAMING-* marker. Without
 // it the signature covers the headers but not the body (AOTF-23).
 func checkPayload(r *http.Request, signed string) error {
+	if payloadMarkers[signed] {
+		return nil
+	}
 	want, err := hex.DecodeString(signed)
-	if err != nil || len(want) != sha256.Size || r.Body == nil || r.Body == http.NoBody {
+	if err != nil || len(want) != sha256.Size {
+		return ErrBadContentSHA256
+	}
+	if r.Body == nil || r.Body == http.NoBody {
 		return nil
 	}
 	if r.ContentLength < 0 || r.ContentLength > maxPrecheckedBody {
