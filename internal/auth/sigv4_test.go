@@ -119,6 +119,36 @@ func TestVerify_Rejects(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+	// S3 signs the x-amz-content-sha256 header, not the body; the body must
+	// match it (AOTF-23).
+	t.Run("tampered s3 body", func(t *testing.T) {
+		r := signed(t, "PUT", "https://s3.amazonaws.com/bkt/key", "aaaa", "s3", "us-east-1",
+			map[string]string{"X-Amz-Content-Sha256": sha("aaaa")}, true)
+		r.Body = io.NopCloser(strings.NewReader("bbbb"))
+		if err := verify(r); !errors.Is(err, ErrContentSHA256Mismatch) {
+			t.Fatalf("got %v", err)
+		}
+	})
+	t.Run("tampered large s3 body", func(t *testing.T) {
+		good, bad := strings.Repeat("a", maxPrecheckedBody+1), strings.Repeat("b", maxPrecheckedBody+1)
+		r := signed(t, "PUT", "https://s3.amazonaws.com/bkt/key", good, "s3", "us-east-1",
+			map[string]string{"X-Amz-Content-Sha256": sha(good)}, true)
+		if err := verify(r); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if b, err := io.ReadAll(r.Body); err != nil || string(b) != good {
+			t.Fatalf("good large body: %v", err)
+		}
+		r = signed(t, "PUT", "https://s3.amazonaws.com/bkt/key", good, "s3", "us-east-1",
+			map[string]string{"X-Amz-Content-Sha256": sha(good)}, true)
+		r.Body = io.NopCloser(strings.NewReader(bad))
+		if err := verify(r); err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		if _, err := io.ReadAll(r.Body); !errors.Is(err, ErrContentSHA256Mismatch) {
+			t.Fatalf("read: %v", err)
+		}
+	})
 	t.Run("tampered host", func(t *testing.T) {
 		r := signed(t, "GET", "https://s3.amazonaws.com/bkt", "", "s3", "us-east-1",
 			map[string]string{"X-Amz-Content-Sha256": sha("")}, true)

@@ -215,6 +215,10 @@ func writeAuthError(w http.ResponseWriter, r *http.Request, err error) {
 		default:
 			code = "RequestExpired"
 		}
+	case errors.Is(err, ErrContentSHA256Mismatch):
+		writeError(w, proto, http.StatusBadRequest, "XAmzContentSHA256Mismatch",
+			"The provided 'x-amz-content-sha256' header does not match what was computed.")
+		return
 	case errors.Is(err, ErrMissingAuth):
 		switch proto {
 		case "s3":
